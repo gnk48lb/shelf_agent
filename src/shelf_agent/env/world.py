@@ -52,8 +52,16 @@ class World:
     def set_robot(self, name: str, state: RobotState) -> None:
         self.robot_states[name] = state
 
-    def place_on_shelf(self, box_id: str) -> str | None:
-        """把箱子放进第一个空槽，返回槽位 id；没有空槽时返回 None。"""
+    def place_on_shelf(self, box_id: str, preferred: str | None = None) -> str | None:
+        """把箱子放进货架槽，返回槽位 id；没有空槽时返回 None。
+
+        ``preferred`` 是期望的槽位：它空着就用它，被别的箱子占了就换另一个空槽
+        （§6 的「槽位被占时换槽」）。槽位非空即视为被占——包括被本箱子占着
+        （箱子既然在工位上，就不该还占着槽位）。
+        """
+        if preferred and preferred in self.shelf_slots and not self.shelf_slots[preferred]:
+            self.shelf_slots[preferred] = box_id
+            return preferred
         for slot_id, occupied in self.shelf_slots.items():
             if not occupied:
                 self.shelf_slots[slot_id] = box_id

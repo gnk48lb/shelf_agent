@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from shelf_agent.config import FailureSkillConfig
 from shelf_agent.env.failures import (
     FailureEvent,
@@ -135,3 +137,30 @@ def test_timeout_lost_probability_follows_p_lost() -> None:
     model2 = RandomFailureModel(seed=3, rate=1.0, skills=skills, p_lost=0.0)
     event2 = model2.next_event("c", 0)
     assert event2 is not None and event2.params["lost"] is False
+
+
+def test_random_model_samples_progress_within_range() -> None:
+    """STUCK / INCOMPLETE 的 progress 必须落在 [0, missing-1]。"""
+    skills = {"s": FailureSkillConfig(weights={"STUCK": 0.5, "INCOMPLETE": 0.5})}
+    model = RandomFailureModel(seed=99, rate=1.0, skills=skills)
+    for missing in (1, 2, 6):
+        for _ in range(20):
+            event = model.next_event("s", 0, {"missing": missing})
+            assert event is not None
+            assert 0 <= event.params["progress"] <= missing - 1
+
+
+def test_parse_event_accepts_dict_and_instance() -> None:
+    from shelf_agent.env.failures import parse_event
+
+    event = parse_event({"kind": "STUCK", "params": {"progress": 3}})
+    assert event is not None and event.kind == "STUCK" and event.params["progress"] == 3
+    same = FailureEvent("STRAY")
+    assert parse_event(same) is same
+    with pytest.raises(ValueError, match="kind"):
+        parse_event({"params": {}})
+
+
+def test_choose_kind_with_zero_weights_yields_no_event() -> None:
+    model = RandomFailureModel(seed=1, rate=1.0, skills={"s": FailureSkillConfig(weights={})})
+    assert model.next_event("s", 0, {"missing": 3}) is None

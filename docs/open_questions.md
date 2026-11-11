@@ -33,14 +33,14 @@
 - **为什么重要**：`carry` 的 `SILENT_FAIL`（返回 done 但箱子没到货架）目前**没有观察通道**——只能靠「再拍一次头部相机，看箱子还在不在工位」这种间接办法。若巡检机器人真能看货架，`inspector_run` 就是唯一直接通道，POST_CHECK 的判定逻辑会不一样，论文里也能报一条更干净的证据。
 - **要向师兄要什么**：一个是/否问题——「能不能让它去看货架？返回什么？」
 - **若答案是能**：把 `inspector_run` 从占位升级为正式路径，`shelf_status` 模式的 `false_negative` 概率可配置；新增一个场景 `carry_silent_fail_detected_by_inspector`。
-- **状态**：待师兄答复。
+- **状态**：待师兄答复。**但路径已备好**：`inspector.mode: shelf_status` 已实现（`configs/*.yaml` 的 `inspector.mode` + `false_negative`），规则策略在 POST_CHECK 之后会调 `inspector_run` 确认；它报 `box_on_shelf=False` 时策略会求助人类，人类也无能为力则诚实 `finish(False)`——此时真值其实成功，outcome 记为 **MISSED_SUCCESS**（口径见 `assumptions.md` A21）。师兄只要回一个「能 / 不能」，把 `inspector.mode` 一改即可，无需改代码。
 
 ### Q4 真机照片的采集与标注规范
 
 - **背景**：Phase 4 的 `FolderImageLibrary` 约定读 `labels.json`，格式 `{"01.jpg": {"inside_count": 0, "outside_count": 0, "is_clear": true, "note": "..."}}`。而现在手头那 20 张 Gemini 生成的图，标签是 `{"actual_count": 5, "status": "partial", "note": "六颗随机散落"}`——**字段名和语义都不一样**（`actual_count` vs `inside_count`；`status` 三值 vs `is_clear` 布尔）。
 - **为什么重要**：这是本期实现里唯一一处「上游产物格式与本项目约定不一致」的地方。如果按 `labels.json` 的约定写实现，等真机照片到位时还要再转一次；而且 `is_clear`（能否看清）和 `status`（装了多少）是**两个正交维度**，合成一个字段会丢掉「看不清」这个信号——而「看不清时宁可重拍」是拒识机制的核心。
 - **若要动**：建议真机照片按 `{"inside_count", "outside_count", "is_clear", "note"}` 标注；历史那 20 张 Gemini 图另存一份、不混进同一个图库（它们不是真实光照）。
-- **状态**：待真机照片到位时确认；Phase 4 才实现，本期只需不挡路。
+- **状态**：**Phase 4 已按本文件的 `labels.json` 约定实现** `FolderImageLibrary`（`perception/imagelib.py`）：读 `labels.json`，按真值 `(inside, outside)` 匹配图片，匹配不上回退合成图。仍未解决的是「历史那 20 张 Gemini 图的标签格式（`actual_count` / `status` 三值）与本约定不一致」——接入真机图库前需一次性转换，且按上面的建议另存一库、不与真机图混在一起。真机照片到位前，本期仍只用合成图。
 
 ### Q5 师兄的机器上用什么 LLM 端点
 

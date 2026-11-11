@@ -207,3 +207,70 @@ def classify_outcome(
     if not success and truth_ok:
         return "MISSED_SUCCESS"
     return "SAFE_ABORT"
+
+
+def run_react_episode(
+    config: AppConfig,
+    seed: int,
+    agent: Any,
+    failure_script: Mapping[str, Sequence[Any]] | None = None,
+    failure_rate: float | None = None,
+    verifier_kind: str | None = "oracle",
+    verifier_reports: Sequence[Mapping[str, Any]] | None = None,
+    max_steps: int | None = None,
+    episode_id: str | None = None,
+) -> EpisodeResult:
+    """用 ReAct agent 跑一个 episode。
+
+    与 :func:`run_episode` 的区别：agent 可能抛 :class:`AgentError`（连续无有效
+    tool call），此时 outcome 记 ``AGENT_ERROR``；同时把完整 messages 与 tools
+    schema 收进结果，供将来的 SFT 使用。
+    """
+    from ..agents.react_agent import AgentError
+
+    episode = make_episode(
+        config,
+        seed=seed,
+        failure_script=failure_script,
+        failure_rate=failure_rate,
+        verifier_kind=verifier_kind,
+        verifier_reports=verifier_reports,
+    )
+    info = build_info(config, episode)
+    agent.start(info)
+    history: list[tuple[ToolCall, ToolResult]] = []
+    limit = max_steps if max_steps is not None else config.budget.soft_limit + config.budget.hard_extra
+    finish_call: ToolCall | None = None
+    agent_error = False
+    while len(history) < limit:
+        if episode.executor.finished or episode.budget.aborted:
+            break
+        try:
+            call = agent.next_call(history)
+        except AgentError:
+            agent_error = True
+            break
+        result = episode.executor.execute(call)
+        history.append((call, result))
+        if call.name == "finish":
+            finish_call = call
+            break
+    outcome = classify_outcome(
+        finish_call=finish_call,
+        truth_ok=_truth_ok(episode, config),
+        budget_aborted=episode.budget.aborted,
+        max_steps_reached=len(history) >= limit and finish_call is None,
+        agent_error=agent_error,
+    )
+    return EpisodeResult(
+        episode_id=episode_id or f"react-seed{seed}",
+        seed=seed,
+        policy=getattr(agent, "name", "react"),
+        outcome=outcome,
+        metrics=collect_metrics(episode, config),
+        steps=episode.trajectory.to_list(),
+        truth_trace=[dict(step.truth_snapshot) for step in episode.trajectory.steps],
+        messages=getattr(agent, "messages", None),
+        tools_schema=getattr(agent, "tools_schema", None),
+        config_hash=config.config_hash(),
+    )

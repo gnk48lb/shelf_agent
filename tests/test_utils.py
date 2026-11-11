@@ -7,7 +7,7 @@ import math
 import pytest
 
 from shelf_agent.utils.clock import VirtualClock
-from shelf_agent.utils.jsonl import append_jsonl, dumps, read_jsonl, write_jsonl
+from shelf_agent.utils.jsonl import append_jsonl, dumps, iter_jsonl, read_jsonl, write_jsonl
 from shelf_agent.utils.rng import derive_digest, derive_rng, derive_seed
 from shelf_agent.utils.stats import mean_and_stderr, wilson_interval
 
@@ -87,6 +87,22 @@ def test_jsonl_append(tmp_path) -> None:
 
 def test_jsonl_dumps_is_sorted_and_compact() -> None:
     assert dumps({"b": 1, "a": 2}) == '{"a":2,"b":1}'
+
+
+def test_jsonl_iter_and_missing_file(tmp_path) -> None:
+    path = tmp_path / "rows.jsonl"
+    write_jsonl(path, [{"x": 1}, {"x": 2}])
+    assert [row["x"] for row in iter_jsonl(path)] == [1, 2]
+    with pytest.raises(FileNotFoundError):
+        read_jsonl(tmp_path / "nope.jsonl")
+    with pytest.raises(FileNotFoundError):
+        list(iter_jsonl(tmp_path / "nope.jsonl"))
+
+
+def test_jsonl_skips_blank_lines(tmp_path) -> None:
+    path = tmp_path / "rows.jsonl"
+    path.write_text('{"x": 1}\n\n{"x": 2}\n', encoding="utf-8")
+    assert read_jsonl(path) == [{"x": 1}, {"x": 2}]
 
 
 def test_wilson_interval_known_values() -> None:

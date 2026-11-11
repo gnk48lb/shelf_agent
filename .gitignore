@@ -12,3 +12,4 @@ results/
 .env
 .idea/
 .vscode/
+.claude/

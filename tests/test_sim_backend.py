@@ -313,3 +313,47 @@ def test_backend_reports_unknown_tool_as_error() -> None:
     result = ep.backend.invoke("nope", {})
     assert result.status == "error"
     assert result.error_code == "UNKNOWN_TOOL"
+
+
+def test_unknown_failure_kind_is_treated_as_no_event() -> None:
+    """未知故障类型按无事件处理，不该让仿真崩掉。"""
+    ep = episode(script={"robot1_install_screws": ["MYSTERY"]})
+    result = ep.backend.invoke("robot1_install_screws", {})
+    assert result.status == "done"
+    assert ep.world.box("box_1").inside == TARGET
+    ep2 = episode(script={"robot2_carry_box": ["MYSTERY"]})
+    ep2.world.box("box_1").inside = TARGET
+    result2 = ep2.backend.invoke("robot2_carry_box", {})
+    assert result2.status == "done"
+    assert ep2.world.box("box_1").location is BoxLocation.SHELF
+
+
+def test_carry_without_free_slot_times_out() -> None:
+    """货架没有空槽 → 搬运失败（箱子仍在工位，robot2 进 FAULT）。"""
+    ep = make_episode(
+        CONFIG,
+        seed=0,
+        failure_rate=0.0,
+        verifier_kind="oracle",
+        box_ids=("box_1", "box_2"),
+        slot_ids=("slot_1",),
+    )
+    ep.world.box("box_2").location = BoxLocation.SHELF
+    ep.world.shelf_slots["slot_1"] = "box_2"
+    result = ep.backend.invoke("robot2_carry_box", {})
+    assert result.status == "timeout"
+    assert ep.world.box("box_1").location is BoxLocation.STATION
+    assert ep.world.robot("robot2") is RobotState.FAULT
+
+
+def test_reset_all_uses_max_of_individual_durations_when_all_is_absent() -> None:
+    from shelf_agent.config import build_config
+
+    raw = {**CONFIG.raw}
+    raw["tools"] = [dict(tool) for tool in CONFIG.raw["tools"]]
+    for tool in raw["tools"]:
+        if tool["name"] == "reset":
+            tool["reset_durations"] = {"robot1": 20, "robot2": 45}
+    ep = make_episode(build_config(raw), seed=0, failure_rate=0.0, verifier_kind="oracle")
+    result = ep.backend.invoke("reset", {"robot": "all"})
+    assert result.duration_s == 45

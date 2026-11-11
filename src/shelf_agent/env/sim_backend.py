@@ -29,7 +29,7 @@ from ..utils.clock import VirtualClock
 from ..utils.rng import derive_rng
 from .failures import FailureModel
 from .human import ScriptedHuman
-from .world import World
+from .world import BoxState, World
 
 #: 工具名常量，避免到处写字符串。
 TOOL_INSTALL = "robot1_install_screws"
@@ -142,6 +142,11 @@ class SimBackend:
         index = self._call_counts.get(tool, 1) - 1
         return self.failures.next_event(tool, index, context)
 
+    def _box_for(self, args: Mapping[str, Any]) -> BoxState:
+        """按调用参数取箱子（多箱配置用 ``box_id``；单箱配置忽略）。"""
+        box_id = str(args.get("box_id") or self.box_id)
+        return self.world.box(box_id)
+
     def _timeout_result(self, tool: str, message: str) -> ToolResult:
         """前置不满足时的统一表现：卡住、超时、状态不变。"""
         spec = self.spec.get(tool)
@@ -155,7 +160,7 @@ class SimBackend:
     def _install(self, args: Mapping[str, Any]) -> ToolResult:
         """一号机器人补装螺丝。"""
         spec = self.spec.get(TOOL_INSTALL)
-        box = self.world.box(self.box_id)
+        box = self._box_for(args)
         missing = self.target - box.inside
         if self.world.robot("robot1") is not RobotState.OK or box.location is not BoxLocation.STATION:
             return self._timeout_result(
@@ -194,16 +199,17 @@ class SimBackend:
     def _carry(self, args: Mapping[str, Any]) -> ToolResult:
         """二号机器人把箱子搬到货架。"""
         spec = self.spec.get(TOOL_CARRY)
-        box = self.world.box(self.box_id)
+        box = self._box_for(args)
         if self.world.robot("robot2") is not RobotState.OK or box.location is not BoxLocation.STATION:
             return self._timeout_result(
                 TOOL_CARRY, "robot2 未就绪或箱子不在工位，技能卡住"
             )
         event = self._next_event(TOOL_CARRY)
-        if event is None:
+        if event is None or event.kind not in ("TIMEOUT", "SILENT_FAIL"):
+            # 无事件（或未知故障类型）：正常搬运。
             if box.inside != self.target or box.outside > 0:
                 self.metrics.unsafe_release = True
-            slot = self.world.place_on_shelf(self.box_id)
+            slot = self.world.place_on_shelf(box.box_id, args.get("slot_id"))
             if slot is None:
                 self.world.set_robot("robot2", RobotState.FAULT)
                 self.clock.advance(spec.timeout_s)
@@ -219,22 +225,19 @@ class SimBackend:
         if kind == "TIMEOUT":
             self.world.set_robot("robot2", RobotState.FAULT)
             if bool(event.params.get("lost", False)):
-                self.world.release_slot(self.box_id)
+                self.world.release_slot(box.box_id)
                 box.location = BoxLocation.LOST
             self.clock.advance(spec.timeout_s)
             self.metrics.n_timeouts += 1
             return ToolResult(status="timeout", message="robot2 搬运超时", duration_s=spec.timeout_s)
-        if kind == "SILENT_FAIL":
-            duration = self._sample_duration(TOOL_CARRY)
-            self.clock.advance(duration)
-            return ToolResult(status="done", message="搬运完成", duration_s=duration)
+        # SILENT_FAIL：返回 done，但箱子仍在工位。
         duration = self._sample_duration(TOOL_CARRY)
         self.clock.advance(duration)
         return ToolResult(status="done", message="搬运完成", duration_s=duration)
 
     def _verify(self, args: Mapping[str, Any]) -> ToolResult:
         """拍照并用验证器检查箱子。"""
-        box = self.world.box(self.box_id)
+        box = self._box_for(args)
         if box.location is not BoxLocation.STATION:
             self.clock.advance(NOT_AT_STATION_DURATION_S)
             return ToolResult(
@@ -251,7 +254,7 @@ class SimBackend:
 
     def _head_image(self, args: Mapping[str, Any]) -> ToolResult:
         """头部相机拍照，只返回图像引用。"""
-        box = self.world.box(self.box_id)
+        box = self._box_for(args)
         if box.location is not BoxLocation.STATION:
             self.clock.advance(NOT_AT_STATION_DURATION_S)
             return ToolResult(

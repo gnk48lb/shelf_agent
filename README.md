@@ -36,7 +36,7 @@ flowchart TD
         NAIVE[naive.py] & RULE[rule_selfheal.py] & REACT[react_agent.py] & LLM[llm_client.py]
     end
     subgraph L3["L3 runtime（运行时）"]
-        EXE[executor.py] & BUD[budget.py] & TRAJ[trajectory.py]
+        EXE[executor.py] & BUD[budget.py] & TRAJ[trajectory.py] & EP[episode.py] & TENV[tool_env.py]
     end
     subgraph L2["L2 env（仿真）"]
         SIM[sim_backend.py] & FAIL[failures.py] & WORLD[world.py] & HUM[human.py] & BE[backend.py]
@@ -45,7 +45,7 @@ flowchart TD
         SPEC[spec.py] & SCHEMA[schema.py] & TYPES[types.py] & COMP[completion.py] & VER[verifier.py] & IMG[imagelib.py]
     end
     subgraph L0["L0 config / utils"]
-        CFG[config.py] & RNG[utils/rng.py] & CLK[utils/clock.py] & JSONL[utils/jsonl.py] & STATS[utils/stats.py]
+        CFG[config.py] & RNG[utils/rng.py] & CLK[utils/clock.py] & JSONL[utils/jsonl.py] & STATS[utils/stats.py] & ENUM[utils/enums.py]
     end
     CLI --> RUN
     RUN --> RULE
@@ -53,6 +53,8 @@ flowchart TD
     RULE & REACT & NAIVE --> EXE
     EXE --> BUD & TRAJ
     EXE --> BE
+    EP --> EXE & SIM
+    TENV --> EP
     BE -.实现.-> SIM
     SIM --> FAIL & WORLD & HUM & VER & IMG
     SIM --> SPEC
@@ -94,7 +96,7 @@ shelf_agent/
 │   └── eval/                 # L5 runner / metrics / scenarios / sweep / report / cli
 ├── scripts/
 │   └── live_probe.py         # 真实 LLM 探针（默认关闭，需显式开关）
-└── tests/                    # 18 个测试文件，全部离线
+└── tests/                    # 15 个测试文件，全部离线
 ```
 
 ---
@@ -321,6 +323,9 @@ shelf-agent sweep --config configs/real_screw.yaml --seeds 100 \
 `summary.md`、`success_vs_failure_rate.png`（双图：成功率 / 误放行与不安全放行，含置信区间）。
 
 **接真实 LLM**（Phase 3，需要网络与 key，**默认不执行、不进 CI**）：
+
+> 下面两条命令是**示例**，本仓库没有对任何真实网关跑过（离线环境，且按 TASK §9 的要求
+> 不实际执行）。第一次用请先跑 `scripts/live_probe.py --list-models` 确认模型 id。
 
 ```bash
 export SHELF_AGENT_LLM_BASE_URL="http://127.0.0.1:3425/v1"   # 本机网关；也可用 Gemini 兼容端点或本地 vLLM

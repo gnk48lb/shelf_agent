@@ -78,6 +78,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_sweep.add_argument("--out", default="results", help="输出目录")
     p_sweep.set_defaults(func=_cmd_sweep)
 
+    p_run = sub.add_parser("run", help="连真实 LLM 跑（需要网络与 API key）")
+    p_run.add_argument("--policy", default="react", help="策略名（目前支持 react）")
+    p_run.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="配置文件路径")
+    p_run.add_argument("--seed", type=int, default=0, help="随机种子")
+    p_run.add_argument("--out", default="results/react", help="轨迹输出目录")
+    p_run.set_defaults(func=_cmd_run)
+
     return parser
 
 
@@ -155,6 +162,37 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     for name in ("episodes.jsonl", "summary.csv", "summary.md", "success_vs_failure_rate.png"):
         path = out_dir / name
         print(f"  {name:32s} {'存在' if path.is_file() else '缺失'}  {path}")
+    return 0
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    """真实 LLM 模式（Phase 3 实现）。"""
+    from ..agents.llm_client import llm_settings_from_env
+
+    try:
+        settings = llm_settings_from_env()
+    except Exception as exc:  # noqa: BLE001 - CLI 顶层需要把错误说清楚
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"使用模型 {settings.model} @ {settings.base_url}（key 已脱敏）")
+    return _run_react(args, settings)
+
+
+def _run_react(args: argparse.Namespace, settings: Any) -> int:
+    from ..agents.react_agent import ReActAgent
+    from ..utils.jsonl import write_jsonl
+    from .runner import run_react_episode
+
+    config = load_config(args.config)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    agent = ReActAgent.from_settings(settings)
+    result = run_react_episode(config, seed=args.seed, agent=agent, episode_id=f"react-seed{args.seed}")
+    write_jsonl(out_dir / "episodes.jsonl", [result.to_dict()])
+    print(f"outcome = {result.outcome}")
+    print(f"makespan_s = {result.metrics['makespan_s']:.1f}")
+    for name in ("episodes.jsonl",):
+        print(f"  {name:32s} {out_dir / name}")
     return 0
 
 

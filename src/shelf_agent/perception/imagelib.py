@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -107,3 +108,58 @@ class SyntheticImageLibrary:
             draw_box(inside, outside).save(target, format="PNG")
             path = str(target)
         return ImageRef(image_id=image_id, path=path, meta={"inside": inside, "outside": outside})
+
+
+class FolderImageLibrary:
+    """真机照片图库：读 ``labels.json``，按真值 (inside, outside) 匹配图片。
+
+    ``labels.json`` 的格式::
+
+        {"01.jpg": {"inside_count": 0, "outside_count": 0, "is_clear": true, "note": "..."}}
+
+    匹配不上时回退到合成图（``fallback``），保证仿真不会因为图库不全而中断。
+    """
+
+    def __init__(
+        self,
+        folder: str | Path,
+        labels_name: str = "labels.json",
+        fallback: ImageLibrary | None = None,
+    ) -> None:
+        self.folder = Path(folder)
+        self.fallback = fallback if fallback is not None else SyntheticImageLibrary()
+        labels_path = self.folder / labels_name
+        self.labels: dict[str, dict[str, Any]] = {}
+        if labels_path.is_file():
+            with labels_path.open("r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if not isinstance(raw, dict):
+                raise ValueError(f"labels.json 顶层必须是对象：{labels_path}")
+            self.labels = {str(k): dict(v) for k, v in raw.items()}
+        self._index: dict[tuple[int, int], list[str]] = {}
+        for name, meta in self.labels.items():
+            key = (int(meta.get("inside_count", 0)), int(meta.get("outside_count", 0)))
+            self._index.setdefault(key, []).append(name)
+        for names in self._index.values():
+            names.sort()
+        self._counter = 0
+
+    def capture(self, truth: Mapping[str, Any]) -> ImageRef:
+        inside = int(truth.get("inside", 0))
+        outside = int(truth.get("outside", 0))
+        names = self._index.get((inside, outside))
+        if not names:
+            return self.fallback.capture(truth)
+        self._counter += 1
+        name = names[self._counter % len(names)]
+        meta = dict(self.labels.get(name, {}))
+        return ImageRef(
+            image_id=name,
+            path=str(self.folder / name),
+            meta={
+                "inside": inside,
+                "outside": outside,
+                "clear": bool(meta.get("is_clear", True)),
+                "note": meta.get("note", ""),
+            },
+        )

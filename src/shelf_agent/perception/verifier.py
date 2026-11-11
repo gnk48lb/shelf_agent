@@ -38,7 +38,7 @@ class OracleVerifier:
         return Report(
             inside=int(meta.get("inside", 0)),
             outside=int(meta.get("outside", 0)),
-            clear=True,
+            clear=bool(meta.get("clear", True)),
         )
 
 
