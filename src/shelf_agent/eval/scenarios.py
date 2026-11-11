@@ -1,172 +1,225 @@
-"""按配置装配一个 episode 的全部部件。
+"""命名场景：测试与演示共用的故障脚本。
 
-这是唯一一处「把配置变成可运行的世界」的地方：世界、后端、验证器、人类、
-故障模型与执行器都在这里组装，测试与评测共用同一套装配逻辑。
+装配逻辑（世界、后端、验证器、执行器）在 ``runtime/episode.py``；这里只负责
+「按名字给出一组可复现的故障脚本与期望结果」。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ..config import AppConfig, build_config, load_config
-from ..contracts.spec import ToolSpecSet, build_spec_set
-from ..contracts.types import ToolCall, ToolResult
-from ..env.failures import FailureModel, RandomFailureModel
-from ..env.human import ScriptedHuman
-from ..env.sim_backend import SimBackend
-from ..env.world import World, make_world
-from ..perception.completion import Report
-from ..perception.imagelib import ImageLibrary, SyntheticImageLibrary
-from ..perception.verifier import (
-    NoisyVerifier,
-    OracleVerifier,
-    ScriptedVerifier,
-    Verifier,
-    load_confusion_table,
+from ..runtime.episode import (
+    DEFAULT_BOX_IDS,
+    DEFAULT_ROBOTS,
+    DEFAULT_SLOT_IDS,
+    Episode,
+    load_episode_config,
+    make_episode,
+    make_failures,
+    make_images,
+    make_verifier,
 )
-from ..runtime.budget import BudgetState
-from ..runtime.executor import ToolExecutor
-from ..runtime.trajectory import Trajectory
-from ..utils.clock import VirtualClock
 
-#: 默认的箱子与槽位清单（real_screw：1 箱 1 槽）。
-DEFAULT_BOX_IDS = ("box_1",)
-DEFAULT_SLOT_IDS = ("slot_1",)
-DEFAULT_ROBOTS = ("robot1", "robot2")
-
-
-@dataclass
-class Episode:
-    """一个装配好的 episode。"""
-
-    config: AppConfig
-    spec: ToolSpecSet
-    world: World
-    backend: SimBackend
-    executor: ToolExecutor
-    trajectory: Trajectory
-    budget: BudgetState
-    clock: VirtualClock
-
-    @property
-    def box_id(self) -> str:
-        return self.backend.box_id
-
-    def truth(self) -> Mapping[str, Any]:
-        """真值快照（评测与测试专用）。"""
-        return self.backend.debug_truth()
-
-    def run(self, call: ToolCall) -> ToolResult:
-        """执行一次工具调用。"""
-        return self.executor.execute(call)
+__all__ = [
+    "DEFAULT_BOX_IDS",
+    "DEFAULT_ROBOTS",
+    "DEFAULT_SLOT_IDS",
+    "Episode",
+    "SCENARIOS",
+    "Scenario",
+    "get_scenario",
+    "load_episode_config",
+    "make_episode",
+    "make_failures",
+    "make_images",
+    "make_verifier",
+    "scenario_names",
+]
 
 
-def make_verifier(
-    config: AppConfig,
-    kind: str | None = None,
-    reports: Sequence[Mapping[str, Any]] | None = None,
-) -> Verifier:
-    """按配置构造验证器。"""
-    chosen = kind or config.verifier.kind
-    if chosen == "oracle":
-        return OracleVerifier()
-    if chosen == "noisy":
-        table = None
-        table_path = config.verifier.confusion_table_path
-        if table_path:
-            table = load_confusion_table(Path(table_path))
-        return NoisyVerifier(
-            target=config.target_screws,
-            p_inside_correct=config.verifier.p_inside_correct,
-            boundary_confusion=config.verifier.boundary_confusion,
-            p_unclear=config.verifier.p_unclear,
-            p_outside_miss=config.verifier.p_outside_miss,
-            confusion_table=table,
-        )
-    if chosen == "scripted":
-        raw = list(reports) if reports is not None else list(config.verifier.scripted_reports)
-        return ScriptedVerifier([Report.from_dict(item) for item in raw])
-    raise ValueError(f"未知的验证器类型 '{chosen}'")
+# --------------------------------------------------------------------- 场景
 
 
-def make_failures(
-    config: AppConfig,
-    seed: int,
-    script: Mapping[str, Sequence[Any]] | None = None,
-    rate: float | None = None,
-) -> FailureModel:
-    """构造故障模型：给了脚本就用脚本，否则用按 rate 的随机注入。"""
-    if script is not None:
-        return FailureModel.scripted(script)
-    effective_rate = config.failures.rate if rate is None else float(rate)
-    return RandomFailureModel(
-        seed=seed,
-        rate=effective_rate,
-        skills=config.failures.skills,
-        p_lost=config.failures.p_lost,
-    )
+@dataclass(frozen=True)
+class Scenario:
+    """一个命名场景：同时用于测试与演示。"""
+
+    name: str
+    description: str
+    failure_script: Mapping[str, Sequence[Any]] | None = None
+    failure_rate: float = 0.0
+    verifier_kind: str = "oracle"
+    verifier_reports: tuple[Mapping[str, Any], ...] | None = None
+    expected_outcome: str = ""
+    expected_sequence: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "failure_script": {k: list(v) for k, v in (self.failure_script or {}).items()},
+            "failure_rate": self.failure_rate,
+            "verifier_kind": self.verifier_kind,
+            "expected_outcome": self.expected_outcome,
+        }
 
 
-def make_images(save_images: bool = False, out_dir: str | Path = "out/images") -> ImageLibrary:
-    """构造图像库。"""
-    return SyntheticImageLibrary(save_images=save_images, out_dir=out_dir)
+#: §5 要求的九个命名场景。
+SCENARIOS: dict[str, Scenario] = {
+    "happy": Scenario(
+        name="happy",
+        description="无故障：装满 → 验证 → 搬运 → 上架",
+        expected_outcome="SUCCESS",
+        expected_sequence=(
+            "robot1_install_screws",
+            "verify_box",
+            "robot2_carry_box",
+            "verify_box",
+            "finish",
+        ),
+    ),
+    "stuck_once": Scenario(
+        name="stuck_once",
+        description="install 卡住一次：reset robot1 → 补装 → 成功",
+        failure_script={"robot1_install_screws": ["STUCK"]},
+        expected_outcome="SUCCESS",
+        expected_sequence=(
+            "robot1_install_screws",
+            "reset",
+            "robot1_install_screws",
+            "verify_box",
+            "robot2_carry_box",
+            "verify_box",
+            "finish",
+        ),
+    ),
+    "incomplete_topup": Scenario(
+        name="incomplete_topup",
+        description="install 装少了：验证发现不满 → 补装 → 成功",
+        failure_script={"robot1_install_screws": [("INCOMPLETE", {"progress": 3})]},
+        expected_outcome="SUCCESS",
+        expected_sequence=(
+            "robot1_install_screws",
+            "verify_box",
+            "robot1_install_screws",
+            "verify_box",
+            "robot2_carry_box",
+            "verify_box",
+            "finish",
+        ),
+    ),
+    "stray_needs_human": Scenario(
+        name="stray_needs_human",
+        description="螺丝散落箱外：验证发现 → 求助人类 → 成功",
+        failure_script={"robot1_install_screws": ["STRAY"]},
+        expected_outcome="SUCCESS",
+        expected_sequence=(
+            "robot1_install_screws",
+            "verify_box",
+            "ask_human",
+            "verify_box",
+            "robot2_carry_box",
+            "verify_box",
+            "finish",
+        ),
+    ),
+    "carry_timeout_reset": Scenario(
+        name="carry_timeout_reset",
+        description="搬运超时：reset robot2 → 确认箱子在工位 → 重搬 → 成功",
+        failure_script={"robot2_carry_box": [("TIMEOUT", {"lost": False})]},
+        expected_outcome="SUCCESS",
+        expected_sequence=(
+            "robot1_install_screws",
+            "verify_box",
+            "robot2_carry_box",
+            "reset",
+            "verify_box",
+            "robot2_carry_box",
+            "verify_box",
+            "finish",
+        ),
+    ),
+    "carry_silent_fail_detected": Scenario(
+        name="carry_silent_fail_detected",
+        description="搬运静默失败：POST_CHECK 发现箱子仍在工位 → 重搬 → 成功",
+        failure_script={"robot2_carry_box": ["SILENT_FAIL"]},
+        expected_outcome="SUCCESS",
+        expected_sequence=(
+            "robot1_install_screws",
+            "verify_box",
+            "robot2_carry_box",
+            "verify_box",
+            "robot2_carry_box",
+            "verify_box",
+            "finish",
+        ),
+    ),
+    "lost_box_needs_human": Scenario(
+        name="lost_box_needs_human",
+        description="箱子丢失：reset → 发现箱子不在工位 → 求助 → 重新搬运 → 成功",
+        failure_script={"robot2_carry_box": [("TIMEOUT", {"lost": True})]},
+        expected_outcome="SUCCESS",
+        expected_sequence=(
+            "robot1_install_screws",
+            "verify_box",
+            "robot2_carry_box",
+            "reset",
+            "verify_box",
+            "ask_human",
+            "verify_box",
+            "robot2_carry_box",
+            "verify_box",
+            "finish",
+        ),
+    ),
+    "stuck_forever": Scenario(
+        name="stuck_forever",
+        description="install 一直卡住：限额耗尽 → 诚实放弃（SAFE_ABORT）",
+        failure_script={"robot1_install_screws": ["STUCK"] * 10},
+        expected_outcome="SAFE_ABORT",
+        expected_sequence=(
+            "robot1_install_screws",
+            "reset",
+            "robot1_install_screws",
+            "reset",
+            "robot1_install_screws",
+            "reset",
+            "robot1_install_screws",
+            "ask_human",
+            "verify_box",
+            "robot1_install_screws",
+            "ask_human",
+            "verify_box",
+            "robot1_install_screws",
+            "finish",
+        ),
+    ),
+    "verifier_false_positive": Scenario(
+        name="verifier_false_positive",
+        description="验证器误报完成：真值 N−1 却报 complete → 错误放行（FALSE_FINISH）",
+        failure_script={"robot1_install_screws": ["STRAY"]},
+        verifier_kind="scripted",
+        verifier_reports=({"inside": 6, "outside": 0, "clear": True},),
+        expected_outcome="FALSE_FINISH",
+        expected_sequence=(
+            "robot1_install_screws",
+            "verify_box",
+            "robot2_carry_box",
+            "verify_box",
+            "finish",
+        ),
+    ),
+}
 
 
-def make_episode(
-    config: AppConfig,
-    seed: int = 0,
-    failure_script: Mapping[str, Sequence[Any]] | None = None,
-    failure_rate: float | None = None,
-    verifier_kind: str | None = None,
-    verifier_reports: Sequence[Mapping[str, Any]] | None = None,
-    save_images: bool = False,
-    image_dir: str | Path = "out/images",
-    box_ids: Sequence[str] = DEFAULT_BOX_IDS,
-    slot_ids: Sequence[str] = DEFAULT_SLOT_IDS,
-    robots: Sequence[str] = DEFAULT_ROBOTS,
-) -> Episode:
-    """装配一个 episode。"""
-    spec = build_spec_set(config)
-    world = make_world(list(box_ids), list(slot_ids), list(robots))
-    clock = VirtualClock()
-    human = ScriptedHuman(latency_s=config.human.latency_s, max_asks=config.human.max_asks)
-    failures = make_failures(config, seed, script=failure_script, rate=failure_rate)
-    images = make_images(save_images=save_images, out_dir=image_dir)
-    verifier = make_verifier(config, kind=verifier_kind, reports=verifier_reports)
-    backend = SimBackend(
-        config=config,
-        spec=spec,
-        world=world,
-        failures=failures,
-        images=images,
-        verifier=verifier,
-        human=human,
-        clock=clock,
-        seed=seed,
-        box_id=box_ids[0],
-    )
-    budget = BudgetState.from_config(config.budget)
-    trajectory = Trajectory()
-    executor = ToolExecutor(
-        backend=backend, spec=spec, budget=budget, trajectory=trajectory, clock=clock
-    )
-    return Episode(
-        config=config,
-        spec=spec,
-        world=world,
-        backend=backend,
-        executor=executor,
-        trajectory=trajectory,
-        budget=budget,
-        clock=clock,
-    )
+def get_scenario(name: str) -> Scenario:
+    """按名字取场景；不存在时抛 KeyError。"""
+    try:
+        return SCENARIOS[name]
+    except KeyError:
+        raise KeyError(f"未知场景 '{name}'，可用场景：{sorted(SCENARIOS)}") from None
 
 
-def load_episode_config(path: str | Path, overrides: Mapping[str, Any] | None = None) -> AppConfig:
-    """读配置并应用顶层覆盖。"""
-    config = load_config(path)
-    if overrides:
-        config = build_config({**config.raw, **overrides}, source_path=config.source_path)
-    return config
+def scenario_names() -> list[str]:
+    return sorted(SCENARIOS)

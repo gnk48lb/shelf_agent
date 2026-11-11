@@ -85,3 +85,4 @@ class EpisodeInfo:
     target_screws: int
     tools: tuple[Any, ...]
     limits: Mapping[str, int] = field(default_factory=dict)
+    inspector_mode: str = "noop"
