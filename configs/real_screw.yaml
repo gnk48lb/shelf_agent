@@ -1,0 +1,142 @@
+# 与真机对齐的场景配置：1 个箱子、1 个货架槽，工具无参数。
+scenario: real_screw
+target_screws: 6
+
+tools:
+  - name: robot1_install_screws
+    lab_name: robot1.install_screws
+    robot: robot1
+    description: "一号机器人把螺丝补装到箱内，直到达到目标数量。阻塞、不可中断。"
+    params: []
+    returns_status: [done, timeout]
+    returns_data: []
+    timeout_s: 120
+    duration: {mean_s: 45, jitter: 0.2}
+    preconditions: ["robot1 为 OK", "箱子在工位"]
+    effects: ["箱内螺丝数补到目标数"]
+
+  - name: robot1_get_head_image
+    lab_name: robot1.get_head_image
+    robot: robot1
+    description: "一号机器人头部相机拍一张箱内照片，只返回图像引用。"
+    params: []
+    returns_status: [ok]
+    returns_data: [image_id, path]
+    timeout_s: 30
+    duration: {mean_s: 1, jitter: 0.0}
+    preconditions: ["箱子在工位"]
+    effects: ["产生一张箱内照片"]
+
+  - name: verify_box
+    lab_name: null
+    robot: null
+    description: "拍照并用验证器检查箱子：箱内数、箱外散落数、是否清晰。"
+    params: []
+    returns_status: [ok, error]
+    returns_data: [inside, outside, clear]
+    timeout_s: 30
+    duration: {mean_s: 3, jitter: 0.0}
+    preconditions: ["箱子在工位"]
+    effects: ["无"]
+
+  - name: robot2_carry_box
+    lab_name: robot2.carry_box
+    robot: robot2
+    description: "二号机器人把箱子搬到货架。阻塞、不可中断。"
+    params: []
+    returns_status: [done, timeout]
+    returns_data: []
+    timeout_s: 180
+    duration: {mean_s: 60, jitter: 0.2}
+    preconditions: ["robot2 为 OK", "箱子在工位"]
+    effects: ["箱子移动到货架"]
+
+  - name: reset
+    lab_name: reset
+    robot: null
+    description: "让机器人回到初始位姿。永不失败。"
+    params:
+      - {name: robot, type: enum, values: [robot1, robot2, all], required: true}
+    returns_status: [ok]
+    returns_data: []
+    timeout_s: 60
+    duration: {mean_s: 30, jitter: 0.0}
+    reset_durations: {robot1: 20, robot2: 30, all: 30}
+    preconditions: []
+    effects: ["目标机器人恢复正常"]
+
+  - name: inspector_run
+    lab_name: inspector.run
+    robot: inspector
+    description: "巡检机器人巡视，默认 noop。"
+    params: []
+    returns_status: [done]
+    returns_data: [box_on_shelf]
+    timeout_s: 60
+    duration: {mean_s: 40, jitter: 0.0}
+    preconditions: []
+    effects: ["无"]
+
+  - name: ask_human
+    lab_name: null
+    robot: null
+    description: "向人类求助：散落螺丝归位、箱子放回工位、故障机器人复位。"
+    params:
+      - {name: question, type: string, required: true}
+    returns_status: [ok, error]
+    returns_data: [answer]
+    timeout_s: 180
+    duration: {mean_s: 120, jitter: 0.0}
+    preconditions: []
+    effects: ["人类处理异常"]
+
+  - name: finish
+    lab_name: null
+    robot: null
+    description: "结束本轮任务。"
+    params:
+      - {name: success, type: bool, required: true}
+      - {name: summary, type: string, required: true}
+    returns_status: [ok]
+    returns_data: []
+    timeout_s: 30
+    duration: {mean_s: 0, jitter: 0.0}
+    preconditions: []
+    effects: ["episode 结束"]
+
+failures:
+  rate: 0.15
+  p_lost: 0.3
+  skills:
+    robot1_install_screws:
+      weights: {STUCK: 0.4, INCOMPLETE: 0.4, STRAY: 0.2}
+    robot2_carry_box:
+      weights: {TIMEOUT: 0.5, SILENT_FAIL: 0.5}
+
+verifier:
+  kind: noisy
+  p_inside_correct: 0.95
+  boundary_confusion: 0.10
+  p_unclear: 0.03
+  p_outside_miss: 0.05
+
+human:
+  latency_s: 120
+  max_asks: 2
+
+inspector:
+  mode: noop
+  false_negative: 0.0
+  duration_s: 40
+
+budget:
+  soft_limit: 40
+  hard_extra: 3
+  max_invalid_calls: 10
+
+rule_policy:
+  max_install_calls: 6
+  max_resets_per_robot: 3
+  max_unclear_retries: 2
+  max_carry_attempts: 3
+  max_human_asks: 2
