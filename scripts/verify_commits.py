@@ -18,7 +18,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "results" / "_commits_check.txt"
-REFS = ["cb4b0f4", "bd88238"]
+#: 要验证的 commit（默认为本轮的两个）。
+REFS = ["80721c2", "26b744f"]
 
 _lines: list[str] = []
 
@@ -37,15 +38,15 @@ def sh(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = Non
 
 
 def main() -> int:
-    # 把提交脚本自己也收进去（它属于工具链的一部分）
-    helper = ROOT / "scripts" / "commit_fix_round.py"
+    # 把验证脚本自己也收进去
+    helper = ROOT / "scripts" / "verify_commits.py"
     if helper.is_file():
-        rc, out = sh(["git", "add", "--", "scripts/commit_fix_round.py"])
-        emit(f"git add commit_fix_round.py -> {rc}")
+        rc, out = sh(["git", "add", "--", "scripts/verify_commits.py"])
+        emit(f"git add verify_commits.py -> {rc}")
         rc, out = sh(
-            ["git", "commit", "-m", "chore: 补上本轮的分阶段提交脚本",
-             "-m", "scripts/commit_fix_round.py 负责按 Phase A+B / Phase C+D 分两次提交，"
-                   "并在每个 commit 后用独立 worktree 验证它自己是绿的。\n\n"
+            ["git", "commit", "-m", "chore: 补上逐 commit 验绿的脚本",
+             "-m", "scripts/verify_commits.py 把每个 commit 单独 checkout 到独立 worktree 跑 pytest，"
+                   "并把结果写进 results/_commits_check.txt。\n\n"
                    "Co-Authored-By: Claude Code <noreply@anthropic.com>"],
         )
         emit(f"git commit -> {rc}")
