@@ -2,11 +2,8 @@
 
 用法（跑完 sweep 之后）::
 
-    uv run python -m shelf_agent.eval.cli sweep --seeds 100 --failure-rates 0,0.05,0.1,0.2,0.3 \
-        --policies naive,retry_only,rule_oracle,rule_noisy --out results/
-    uv run python -m shelf_agent.eval.cli sweep-verifier --failure-rate 0.3 \
-        --levels 0,0.1,0.25,0.5,1.0 --seeds 200 \
-        --policies rule_oracle,rule_noisy,retry_only --out results/verifier/
+    uv run python -m shelf_agent.eval.cli sweep --seeds 100 --failure-rates 0,0.05,0.1,0.2,0.3 --policies naive,retry_only,rule_oracle,rule_noisy --out results/
+    uv run python -m shelf_agent.eval.cli sweep-verifier --failure-rate 0.3 --levels 0,0.1,0.25,0.5,1.0 --seeds 200 --policies rule_oracle,rule_noisy,retry_only --out results/verifier/
     uv run python scripts/render_readme_tables.py --out results --readme README.md
 
 这样 README 里的每个数字都直接来自那两次运行的产物，不需要手抄。

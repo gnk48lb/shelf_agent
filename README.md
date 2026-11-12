@@ -19,8 +19,7 @@ LLM）、评测工具（批量运行 / 指标 / 故障率扫描 / 出图）、�
 uv sync --extra dev          # 首次安装依赖（uv 不可用时见 §8）
 uv run pytest -q             # 全量离线单测
 uv run python -m shelf_agent.eval.cli demo --scenario stuck_once --show-truth
-uv run python -m shelf_agent.eval.cli sweep --config configs/real_screw.yaml --seeds 100 \
-    --failure-rates 0,0.05,0.1,0.2,0.3 --policies naive,retry_only,rule_oracle,rule_noisy --out results/
+uv run python -m shelf_agent.eval.cli sweep --config configs/real_screw.yaml --seeds 100 --failure-rates 0,0.05,0.1,0.2,0.3 --policies naive,retry_only,rule_oracle,rule_noisy --out results/
 ```
 
 ### 组会演示（3 条命令 + 2 张图）
@@ -39,6 +38,7 @@ uv run python -m shelf_agent.eval.cli demo --scenario verifier_false_positive --
 - **图 1**：`results/success_vs_failure_rate.png`——左图是成功率随故障注入率的变化（Wilson 区间），
   右图是误放行与不安全放行比例。**想说明的是**：不做自愈的 `naive` 会随故障率崩掉，
   而「重试 + 验证 + 求助」这条链路几乎不受影响；代价是时间。
+  逐个图元的读法见 §7.1「怎么看 `success_vs_failure_rate.png`」。
 - **图 2**：`results/verifier/verifier_sweep.png`——误放行率随**验证器噪声档位**的变化。
   **想说明的是**：验证器质量是端到端成功率的独立风险来源，规则策略挡不住「误报完成」，
   这一点在 §7.1 的默认噪声下（100 seed）看不出来。
@@ -262,10 +262,11 @@ flowchart TD
 ### 7.1 故障率扫描
 
 ```bash
-uv run python -m shelf_agent.eval.cli sweep --config configs/real_screw.yaml \
-    --seeds 100 --failure-rates 0,0.05,0.1,0.2,0.3 \
-    --policies naive,retry_only,rule_oracle,rule_noisy --out results/
+uv run python -m shelf_agent.eval.cli sweep --config configs/real_screw.yaml --seeds 100 --failure-rates 0,0.05,0.1,0.2,0.3 --policies naive,retry_only,rule_oracle,rule_noisy --out results/
 ```
+
+> 写成一行而不是用 `\` 续行，是为了能直接粘进 **PowerShell / cmd**——那两个 shell 不认 bash 的
+> `\` 续行符。上面这个命令约 3 秒跑完（2000 个 episode），现场跑比贴图有说服力。
 
 配置：`configs/real_screw.yaml`（N=6，故障权重 STUCK 0.4 / INCOMPLETE 0.4 / STRAY 0.2，
 carry TIMEOUT 0.5 / SILENT_FAIL 0.5，`p_lost=0.3`）。每个故障率 × 每个策略共用**同一批
@@ -324,15 +325,137 @@ carry TIMEOUT 0.5 / SILENT_FAIL 0.5，`p_lost=0.3`）。每个故障率 × 每�
    `FALSE_FINISH` 与 `unsafe_release` 比例；同一条 x 上多个策略做了 dodge 偏移以便看清）。
    `results/summary.csv` 与 `results/summary.md` 是同一批数字的机器可读版本。
 
+#### 怎么看 `results/success_vs_failure_rate.png`
+
+这张图就是上面那张表的图形版，**两个子图共用 x 轴**（`failure_rate`）。读图之前得先把两个
+关键词在这个项目里的确切含义说清楚——**四条线的全部差别都落在这两件事上**。
+
+##### 一、「验证」在这套仿真里到底做了什么
+
+`verify_box` 是一个**复合工具**：它内部自己调一次头部相机拍照，再把照片交给验证器读图，
+最终返回三个数字——`inside`（箱内螺丝数）、`outside`（箱外散落数）、`clear`（视野是否清晰）。
+「箱子装好了」只有一处判据（`perception/completion.py::is_complete`）：
+
+```python
+is_complete(report, target) = report.clear and report.inside == target and report.outside == 0
+```
+
+照片是真的画出来的 PNG（箱内蓝螺丝、箱外红螺丝，箱内 4×3 共 12 个槽位），但**验证器读的不是
+像素，而是图片附带的 meta 标签**——`ImageRef.meta` 里直接存着真值计数，并且明确标注「不得进入
+agent 输入」（`ImageRef.public()` 只暴露 `image_id` 和 `path`）。所以绿线模拟的是
+「**VLM 把图看错了**」，不是「像素识别错了」；接真机时这一步才换成真正的 VLM 调用。
+
+`verify_box` 只有两种返回：`ok` + 一份报告，或 `error [BOX_NOT_AT_STATION]`（箱子不在工位，
+没法再拍）。后者是**位置**问题不是**准不准**的问题，只出现在 `rule` 策略的两处：`CARRY_CHECK`
+（搬运超时后 reset 完，回头确认箱子还在不在——箱子 `LOST` 就会撞上它，于是转去求助人类）和
+`POST_CHECK`（搬运成功之后再验一次——箱子已经在货架上了）。这两种情况的**处理完全相反**：
+前者是「出事了，去求助」，后者是「成了，可以收工」。
+
+而 `POST_CHECK` 这一处恰恰是「误放行没法治」的根源：**搬运之后没有任何环节会再看箱内**，
+所以搬运前那一次验证的误报放行，不会被后面任何一步纠正。
+
+`rule_oracle`（蓝）与 `rule_noisy`（绿）**跑的是同一份策略代码**，唯一差别是配哪个验证器：
+
+| | `rule_oracle`（蓝） | `rule_noisy`（绿） |
+|---|---|---|
+| 验证器 | `OracleVerifier`：直接读真值，永远正确（**只存在于仿真里**） | `NoisyVerifier`：读数可能偏离真值 |
+| 计数 | 永远准 | 95% 报准，5% 报 `真值 ± 1` |
+| 边界 | — | 真值是 N±1 时，10% 概率被「纠正」成 N ← **误放行的来源** |
+| 散落 | — | 箱外有螺丝时，5% 概率漏报成 0 |
+| 清晰 | — | 3% 概率报 `clear=False`（画面不清，要重拍） |
+
+这一组是**消融**：策略逻辑完全一样，把「决策错了」和「感知错了」拆开看。默认噪声下 100 seed
+分不出差别（两者都是 99/100）——**不是「噪声没影响」**，而是差距小于样本分辨率：同一批 seed
+加到 1000 时就分得开了（`rule_noisy` 968/1000 vs `rule_oracle` 976/1000，配对 **胜 8 / 负 0 /
+平 992**）。噪声真正拉开差距的地方是 §7.2（那里差 10 倍级别）。
+⚠️ **`rule_oracle` 是上界，不是可达到的目标**——真机上没有 oracle 验证器，只有绿那条线算数。
+
+##### 二、「重试」在这一族策略里各指什么
+
+「重试」不是单个动作，是一族动作，而且**只有一部分是 reset**：
+
+| 遇到的故障 | 恢复动作 | 是 reset 吗 |
+|---|---|---|
+| install 卡住（注入 STUCK，robot1 进 FAULT） | `reset(robot1)` → 再 install | ✅ |
+| install 返回 done 但**装少了** | **直接再 install**（补装） | ❌ |
+| 验证报 `clear=False`（看不清） | **原地再 verify**（重拍） | ❌ |
+| carry 超时（注入 TIMEOUT，robot2 进 FAULT） | `reset(robot2)` → verify → 再 carry | ✅ |
+| carry **静默失败**（返回 done 但箱子没走） | **直接再 carry** | ❌ |
+| 箱子丢失 / 螺丝散落 | `ask_human` 求助 | ❌ |
+
+`reset` 只对「机器人进了 FAULT」有意义：STUCK 时 robot1 卡死，不复位它就干不了活。而「装少了 /
+看不清 / 静默失败」这几种机器人状态是好的，reset 对它们毫无意义——后端会把这种 reset 记进
+`n_unnecessary_resets`（reset 时目标机器人本来就是 OK 就 +1）。
+
+这里有个容易忽略的细节：**`timeout` 有两种来源，而 agent 分不出来**。
+
+- **机器人卡住**（注入 STUCK / TIMEOUT 故障）→ 机器人进 FAULT → **必须** reset；
+- **前置不满足**（比如箱子搬运途中丢了、不在工位）→ 后端照样返回 `timeout`，但**状态完全不变**
+  （`sim_backend._timeout_result` 的注释原话是「卡住、超时、状态不变」）→ 这时 reset 是**多余**的。
+
+`retry_only` 只看 `status`，两种都当成「机器人卡了」→ 一律 reset。实测数据里，
+**故障率 0.05–0.3 时各有 2–3 个 episode 出现了多余 reset**，典型链条是：
+`carry` 遇到注入的 TIMEOUT 且箱子丢失 → `retry_only` reset robot2（这次必要）→ 再 carry 时
+箱子已经不在工位 → 触发前置违规返回 timeout → 它又 reset（这次完全没必要）→ 如此反复直到
+`max_carry_attempts` 用尽，只能 `finish(False)` 交出 `SAFE_ABORT`。
+
+**所以图上三条线的排序，就是上面那张表的排序**：
+
+| 策略 | 遇到 timeout | 遇到「返回 done 但其实没做好」 | 故障率 0.3 时的成功率 |
+|---|---|---|---|
+| `naive` | 什么都不做，直接 `finish(True)` | 不知道 | **0.52** |
+| `retry_only` | reset → 重试同一个调用 | 不知道（不验证） | **0.73** |
+| `rule` | reset 后重试（必要时先 verify 确认） | 验证 → 分情况恢复 | **0.99** |
+
+`retry_only` 掉队的原因很具体：它能扛住「返回 timeout」的故障（STUCK / 搬运超时），
+但对「返回 done 的故障」（装少了 / 散落了 / 静默失败）**完全没有察觉能力**——不验证就永远
+发现不了。`rule` 之所以能到 0.99，靠的正是「验证」这一环，而不是更聪明的重试逻辑。
+
+##### 三、两个子图分别看什么
+
+**左图 —— 成功率随故障注入率变化（含 Wilson 95% CI）**
+
+| 图元 | 含义 |
+|---|---|
+| 横轴 `failure_rate` | 故障注入率 0 / 0.05 / 0.1 / 0.2 / 0.3：**每次物理技能调用**有多大概率被注入一次故障。0 就是无故障，0.3 就是三成的调用会出事 |
+| 纵轴 `SUCCESS 比例` | 该组合下真正做成（箱子在货架 + 箱内正好 N 颗 + 箱外无散落）的 episode 比例，固定 0–1 |
+| 一个点 | 该故障率 × 该策略下 **100 个 episode** 的成功率 |
+| 竖线（误差棒） | **Wilson 95% 置信区间**：点估计的不确定范围。棒越短说明估计越稳；**两根棒重叠 ⇒ 这个差距在 100 seed 下说不清** |
+| 四条线 | `naive`（红，●）、`retry_only`（黄，■）、`rule_noisy`（绿，▲）、`rule_oracle`（蓝，◆）——**颜色之外还有标记形状**这一层，灰度打印或投影仪偏色时也分得开 |
+
+读法：**线越平越高越好**。`naive` 从 1.0 一路掉到 0.52（故障率 0.3 处）；`retry_only` 掉到 0.73；
+两条 `rule` 线几乎贴住 1.0（0.3 处 0.99）。看误差棒：`naive` 从故障率 0.05 起就与 `rule`
+**完全不重叠**；`retry_only` 在 0.05 处还和 `rule` 有一点点交叠（0.9630–0.9656），从 0.1 起
+也分得干干净净——差距是真的，不是采样噪声。
+
+**右图 —— 误放行与不安全放行比例**
+
+| 图元 | 含义 |
+|---|---|
+| **实线 + 方块** | `FALSE_FINISH` 率：策略宣称「做成了」，但真值没成功 = **谎报成功** |
+| **虚线 + 三角** | `unsafe_release` 率：**不完整的箱子真的被搬上了货架**（物理上出事了） |
+| 两者的差 | `FALSE_FINISH` 高但 `unsafe_release` 低 = 箱子没搬上去，只是嘴上报喜；两者同高 = 真出事了 |
+
+读法：`naive` 两条都在涨（0.48 / 0.21），且**实线始终高于虚线**——它连搬运超时、箱子根本没上架
+的情况下也照样 `finish(True)`，属于「嘴上报喜」，所以两种失败会分开计数。
+两条 `rule` 线全程贴着 0。
+
+**一个容易被追问的细节**
+
+同一个 x 上四条线错开了一点点（±0.009）：这是画图技巧（dodge 偏移），**不是数据**。
+真实 x 坐标就是 0 / 0.05 / 0.1 / 0.2 / 0.3。不加偏移的话，多条线的误差棒会互相遮挡看不清；
+而 `rule_noisy` 与 `rule_oracle` 的成功率**数值完全相同**，没有这点横向错开就只剩上面那条能看见。
+
+**一句话结论**：故障率越高、差距越大；`rule` 这条「重试 + 验证 + 求助」的链路买到了成功率，
+**代价是时间**（`rule_noisy` 的 makespan 从 110 s 涨到 207 s）。
+
 > ⚠️ 这些结论建立在**拍的**故障参数上（见 §9 局限 1、2）。故障率旋钮扫的是「注入多频繁」，
 > 不是「真机多容易坏」；本文不声称「换一组权重结论不变」——那需要另做敏感性实验。
 
 ### 7.2 验证器质量扫描
 
 ```bash
-uv run python -m shelf_agent.eval.cli sweep-verifier --config configs/real_screw.yaml \
-    --failure-rate 0.3 --levels 0,0.1,0.25,0.5,1.0 --seeds 200 \
-    --policies rule_oracle,rule_noisy,retry_only --out results/verifier/
+uv run python -m shelf_agent.eval.cli sweep-verifier --config configs/real_screw.yaml --failure-rate 0.3 --levels 0,0.1,0.25,0.5,1.0 --seeds 200 --policies rule_oracle,rule_noisy,retry_only --out results/verifier/
 ```
 
 每个档位把 `verifier.boundary_confusion` 与 `verifier.p_outside_miss` 同时抬到该档位
@@ -389,8 +512,7 @@ python -m pytest -q
 ```bash
 shelf-agent list-scenarios
 shelf-agent demo --scenario lost_box_needs_human --show-truth
-shelf-agent sweep --config configs/real_screw.yaml --seeds 100 \
-    --failure-rates 0,0.05,0.1,0.2,0.3 --policies naive,rule_oracle,rule_noisy --out results/
+shelf-agent sweep --config configs/real_screw.yaml --seeds 100 --failure-rates 0,0.05,0.1,0.2,0.3 --policies naive,rule_oracle,rule_noisy --out results/
 ```
 
 `sweep` 的产物：`episodes.jsonl`（每行一个 episode，含完整轨迹与真值轨迹）、`summary.csv`、
