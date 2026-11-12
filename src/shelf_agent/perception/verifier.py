@@ -52,7 +52,14 @@ class NoisyVerifier:
        ——这就是「错误放行」的来源；
     3. 真值 ``outside > 0`` 时，以 ``p_outside_miss`` 的概率漏报成 0；
     4. 以 ``p_unclear`` 的概率给出 ``clear=False``。
+
+    **每次调用无条件抽固定 5 个**均匀随机数（§B1）：分支只决定怎么用这 5 个数，
+    不决定抽几个——否则同一条流的后续位置会依赖真值，「第 n 次验证的噪声命运」
+    就不再与真值无关。
     """
+
+    #: 每次 ``verify`` 无条件抽取的均匀随机数个数。
+    DRAWS_PER_VERIFY = 5
 
     def __init__(
         self,
@@ -88,47 +95,49 @@ class NoisyVerifier:
             loaded = {int(k): {int(pk): float(pv) for pk, pv in v.items()} for k, v in table.items()}
         return cls(target=target, confusion_table=loaded, **kwargs)
 
-    def _predict_inside(self, true_inside: int, rng: random.Random) -> int:
+    def _predict_inside(self, true_inside: int, u: Sequence[float]) -> int:
         inside: int | None = None
         if self.confusion_table:
             row = self.confusion_table.get(true_inside)
             if row:
-                inside = _sample_from_distribution(row, rng)
+                inside = _sample_from_distribution(row, u[0])
         if inside is None:
-            if rng.random() < self.p_inside_correct:
+            if u[0] < self.p_inside_correct:
                 inside = true_inside
             else:
-                delta = 1 if rng.random() < 0.5 else -1
+                delta = 1 if u[1] < 0.5 else -1
                 inside = max(0, true_inside + delta)
         # 边界混淆：真值是 N±1 时有一定概率被「纠正」成 N（错误放行）。
-        if abs(true_inside - self.target) == 1 and rng.random() < self.boundary_confusion:
+        if abs(true_inside - self.target) == 1 and u[2] < self.boundary_confusion:
             inside = self.target
         return inside
 
-    def _predict_outside(self, true_outside: int, rng: random.Random) -> int:
+    def _predict_outside(self, true_outside: int, u: Sequence[float]) -> int:
         if true_outside <= 0:
             return 0
-        if rng.random() < self.p_outside_miss:
+        if u[3] < self.p_outside_miss:
             return 0
         return true_outside
 
     def verify(self, image_ref: ImageRef, rng: random.Random) -> Report:
+        # 无条件抽固定个数：分支不改变抽取次数。
+        u = [rng.random() for _ in range(self.DRAWS_PER_VERIFY)]
         true_inside = int(image_ref.meta.get("inside", 0))
         true_outside = int(image_ref.meta.get("outside", 0))
         return Report(
-            inside=self._predict_inside(true_inside, rng),
-            outside=self._predict_outside(true_outside, rng),
-            clear=rng.random() >= self.p_unclear,
+            inside=self._predict_inside(true_inside, u),
+            outside=self._predict_outside(true_outside, u),
+            clear=u[4] >= self.p_unclear,
         )
 
 
-def _sample_from_distribution(dist: Mapping[int, float], rng: random.Random) -> int:
-    """按概率分布抽一个键。"""
+def _sample_from_distribution(dist: Mapping[int, float], u: float) -> int:
+    """按概率分布抽一个键（``u`` 是预先抽好的均匀随机数）。"""
     items = sorted(dist.items())
     total = sum(p for _, p in items)
     if total <= 0:
         return items[0][0]
-    threshold = rng.random() * total
+    threshold = u * total
     acc = 0.0
     for key, prob in items:
         acc += prob

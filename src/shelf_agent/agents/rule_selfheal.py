@@ -1,6 +1,6 @@
 """规则自愈策略：显式状态机。
 
-流程（状态 + 转移表见 :data:`TRANSITIONS`）::
+流程（状态 + 兜底转移表见 :data:`FALLBACK_TRANSITIONS`）::
 
     INSTALL ──done──▶ VERIFY ──complete──▶ CARRY ──done──▶ POST_CHECK
        ▲                  ▲                                    │
@@ -30,7 +30,6 @@ from typing import Any, Mapping, Sequence
 
 from ..contracts.types import EpisodeInfo, ToolCall, ToolResult
 from ..perception.completion import Report, is_complete
-from .policy import Policy
 
 #: 策略限额默认值（与 ``configs/real_screw.yaml`` 的 rule_policy 段一致）。
 DEFAULT_LIMITS: dict[str, int] = {
@@ -57,8 +56,17 @@ class RuleState(str, Enum):
     FINISH = "FINISH"
 
 
-#: 转移表：状态 × 事件 → 下一状态。
-TRANSITIONS: dict[RuleState, dict[str, RuleState]] = {
+#: **兜底**转移表：状态 × 事件 → 下一状态。
+#:
+#: 注意：这**不是**唯一的状态来源。:meth:`RuleSelfHealPolicy._handle` 里先处理
+#: 一批「特例」（限额守卫、前置违规、注入事件标注），只有没被特例吃掉的��件才
+#: 查这张表。所以表里有些条目在当前配置下是**够不到**的（例如「reset 被预算
+#: 拒绝」才会走 ``reset_error``）。表保持完整是为了不依赖「当前配置恰好够不到」
+#: 这种偶然——真到那条分支时行为仍然正确。
+#:
+#: 想把它变成「唯一来源」需要把限额守卫也搬进表里，但那会动到策略行为，
+#: 收益不抵风险，详见 ``docs/open_questions.md``。
+FALLBACK_TRANSITIONS: dict[RuleState, dict[str, RuleState]] = {
     RuleState.INSTALL: {
         "install_done": RuleState.VERIFY,
         "install_timeout": RuleState.RESET1,
@@ -211,7 +219,7 @@ class RuleSelfHealPolicy:
             # 巡检确认箱子在架上 —— 这是唯一「有独立证据」的完工信号。
             self._finish(True, "巡检确认箱子已在货架上")
             return
-        target = TRANSITIONS.get(self._state, {}).get(event)
+        target = FALLBACK_TRANSITIONS.get(self._state, {}).get(event)
         if target is None:
             self._goto_human_or_finish(f"无法处理的状态：{self._state.value}/{event}")
             return

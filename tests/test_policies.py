@@ -12,7 +12,7 @@ CONFIG = load_config("configs/real_screw.yaml")
 TARGET = CONFIG.target_screws
 
 
-def _run(scenario: Scenario, seed: int = 0, policy_name: str = "rule"):
+def _run(scenario: Scenario, seed: int = 0, policy_name: str = "rule_oracle"):
     return run_episode(
         CONFIG,
         seed=seed,
@@ -156,12 +156,17 @@ def test_carry_only_after_a_complete_report(rate: float) -> None:
 
 def test_policy_never_sees_truth() -> None:
     """策略拿到的结果里不含真值字段（真值只进轨迹快照）。"""
+    from shelf_agent.env.sim_backend import ALLOWED_MESSAGES
     for name in sorted(SCENARIOS):
         result = _run(SCENARIOS[name])
         for step in result.steps:
             payload = step["result"]
             assert set(payload) == {"status", "error_code", "message", "duration_s", "data"}
             assert "truth_snapshot" not in payload
+            if step["call"]["name"] != "ask_human":
+                assert payload["message"] in ALLOWED_MESSAGES, (
+                    f"{name}: message 泄露了隐藏状态：{payload['message']!r}"
+                )
 
 
 # --------------------------------------------------------- 巡检机器人与边界分支
@@ -189,7 +194,7 @@ def test_shelf_status_inspector_confirms_the_delivery() -> None:
     result = _run_episode(
         config,
         seed=0,
-        policy_name="rule",
+        policy_name="rule_oracle",
         failure_script=SCENARIOS["happy"].failure_script,
         failure_rate=0.0,
         verifier_kind="oracle",
@@ -212,7 +217,7 @@ def test_shelf_status_inspector_missing_box_asks_human() -> None:
     result = _run_episode(
         config,
         seed=0,
-        policy_name="rule",
+        policy_name="rule_oracle",
         failure_script=SCENARIOS["happy"].failure_script,
         failure_rate=0.0,
         verifier_kind="oracle",
@@ -238,7 +243,7 @@ def test_human_quota_exhausted_ends_with_honest_failure() -> None:
     result = _run_episode(
         strict,
         seed=0,
-        policy_name="rule",
+        policy_name="rule_oracle",
         failure_script=SCENARIOS["stray_needs_human"].failure_script,
         failure_rate=0.0,
         verifier_kind="oracle",
@@ -254,11 +259,14 @@ def test_budget_rejection_during_install_ends_honestly() -> None:
     from shelf_agent.eval.runner import run_episode as _run_episode
 
     config = _config_with_inspector("noop")
-    raw = {**config.raw, "budget": {**config.raw["budget"], "soft_limit": 0, "hard_extra": 1}}
+    # soft_limit 必须 >= 1（配置校验要求）。用 2：install/verify 正常执行，第 3 次
+    # 调用（carry）被预算拒绝，策略随后诚实 finish(False)。
+    # 步数上限 = soft_limit + hard_extra = 4，刚好容得下那一次 finish。
+    raw = {**config.raw, "budget": {**config.raw["budget"], "soft_limit": 2, "hard_extra": 2}}
     from shelf_agent.config import build_config
 
     strict = build_config(raw)
-    result = _run_episode(strict, seed=0, policy_name="rule", failure_rate=0.0, verifier_kind="oracle")
+    result = _run_episode(strict, seed=0, policy_name="rule_oracle", failure_rate=0.0, verifier_kind="oracle")
     assert result.outcome in ("ABORTED_BUDGET", "SAFE_ABORT")
     if result.outcome == "SAFE_ABORT":
         assert result.steps[-1]["call"]["args"]["success"] is False

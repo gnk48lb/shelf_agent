@@ -13,9 +13,16 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..config import DEFAULT_CONFIG_PATH, load_config
-from .runner import run_episode
+from .runner import POLICIES, run_episode
 from .scenarios import SCENARIOS, get_scenario, scenario_names
-from .sweep import DEFAULT_POLICIES, DEFAULT_RATES, DEFAULT_SEEDS, run_sweep
+from .sweep import (
+    DEFAULT_LEVELS,
+    DEFAULT_POLICIES,
+    DEFAULT_RATES,
+    DEFAULT_SEEDS,
+    run_sweep,
+    run_verifier_sweep,
+)
 
 #: ANSI 颜色（``--no-color`` 时全部置空）。
 COLORS = {
@@ -78,6 +85,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_sweep.add_argument("--out", default="results", help="输出目录")
     p_sweep.set_defaults(func=_cmd_sweep)
 
+    p_ver = sub.add_parser("sweep-verifier", help="验证器质量扫描（噪声档位当自变量）")
+    p_ver.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="配置文件路径")
+    p_ver.add_argument("--failure-rate", type=float, default=0.3, help="固定故障注入率")
+    p_ver.add_argument(
+        "--levels",
+        default=",".join(str(level) for level in DEFAULT_LEVELS),
+        help="验证器噪声档位，逗号分隔",
+    )
+    p_ver.add_argument("--seeds", type=int, default=200, help="每个组合的 seed 数")
+    p_ver.add_argument(
+        "--policies",
+        default="rule_oracle,rule_noisy,retry_only",
+        help="策略列表，逗号分隔",
+    )
+    p_ver.add_argument("--out", default="results/verifier", help="输出目录")
+    p_ver.set_defaults(func=_cmd_sweep_verifier)
+
     p_run = sub.add_parser("run", help="连真实 LLM 跑（需要网络与 API key）")
     p_run.add_argument("--policy", default="react", help="策略名（目前支持 react）")
     p_run.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="配置文件路径")
@@ -110,7 +134,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     result = run_episode(
         config,
         seed=args.seed,
-        policy_name="rule",
+        policy_name="rule_oracle",
         failure_script=scenario.failure_script,
         failure_rate=scenario.failure_rate,
         verifier_kind=scenario.verifier_kind,
@@ -137,6 +161,13 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     if not rates or not policies:
         print("--failure-rates 与 --policies 不能为空", file=sys.stderr)
         return 2
+    unknown = [name for name in policies if name not in POLICIES]
+    if unknown:
+        print(
+            f"未知策略 {unknown}，可用：{sorted(POLICIES)}",
+            file=sys.stderr,
+        )
+        return 2
     out_dir = Path(args.out)
     sweep = run_sweep(
         config,
@@ -160,6 +191,45 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
             )
         )
     for name in ("episodes.jsonl", "summary.csv", "summary.md", "success_vs_failure_rate.png"):
+        path = out_dir / name
+        print(f"  {name:32s} {'存在' if path.is_file() else '缺失'}  {path}")
+    return 0
+
+
+def _cmd_sweep_verifier(args: argparse.Namespace) -> int:
+    """验证器质量扫描：噪声档位当自变量。"""
+    config = load_config(args.config)
+    levels = [float(x) for x in str(args.levels).split(",") if x.strip()]
+    policies = [x.strip() for x in str(args.policies).split(",") if x.strip()]
+    if not levels or not policies:
+        print("--levels 与 --policies 不能为空", file=sys.stderr)
+        return 2
+    unknown = [name for name in policies if name not in POLICIES]
+    if unknown:
+        print(f"未知策略 {unknown}，可用：{sorted(POLICIES)}", file=sys.stderr)
+        return 2
+    out_dir = Path(args.out)
+    sweep = run_verifier_sweep(
+        config,
+        failure_rate=args.failure_rate,
+        levels=levels,
+        seeds=args.seeds,
+        policies=policies,
+        out_dir=out_dir,
+    )
+    print(f"完成：{len(sweep.results)} 个 episode，结果写到 {out_dir}")
+    for row in sweep.summary_rows:
+        print(
+            "  level={level:<5} {policy:<12} SUCCESS={succ:<5} FALSE_FINISH={ff:<4} "
+            "unsafe_release={unsafe:.4f}".format(
+                level=row["verifier_level"],
+                policy=row["policy"],
+                succ=row["success"],
+                ff=row["false_finish"],
+                unsafe=row["unsafe_release_rate"],
+            )
+        )
+    for name in ("episodes.jsonl", "verifier_sweep.csv", "verifier_sweep.md", "verifier_sweep.png"):
         path = out_dir / name
         print(f"  {name:32s} {'存在' if path.is_file() else '缺失'}  {path}")
     return 0

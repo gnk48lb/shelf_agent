@@ -188,6 +188,23 @@ def test_reset_of_healthy_robot_counts_as_unnecessary() -> None:
     assert ep.backend.metrics.n_resets == 1
 
 
+def test_unnecessary_reset_is_counted_per_call_not_per_robot() -> None:
+    """§B3：reset(all) 只有一台故障时不算「不必要」。"""
+    ep = episode()
+    ep.world.set_robot("robot1", RobotState.FAULT)
+    ep.backend.invoke("reset", {"robot": "all"})
+    assert ep.backend.metrics.n_unnecessary_resets == 0
+    assert ep.backend.metrics.n_resets == 1
+
+    ep2 = episode()
+    ep2.backend.invoke("reset", {"robot": "all"})
+    assert ep2.backend.metrics.n_unnecessary_resets == 1
+
+    ep3 = episode()
+    ep3.backend.invoke("reset", {"robot": "robot1"})
+    assert ep3.backend.metrics.n_unnecessary_resets == 1
+
+
 # --------------------------------------------------------------------- verify
 
 

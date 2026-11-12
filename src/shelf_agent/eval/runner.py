@@ -13,6 +13,7 @@ from ..config import AppConfig
 from ..contracts.types import EpisodeInfo, ToolCall, ToolResult
 from ..agents.naive import NaiveScriptPolicy
 from ..agents.policy import Policy
+from ..agents.retry_only import RetryOnlyPolicy
 from ..agents.rule_selfheal import RuleSelfHealPolicy
 from ..perception.completion import truth_success
 from .scenarios import Episode, make_episode
@@ -54,27 +55,49 @@ class EpisodeResult:
         return payload
 
 
+@dataclass(frozen=True)
+class PolicySpec:
+    """策略注册项：名字 → 实现 + 验证器类型。"""
+
+    name: str
+    kind: str
+    verifier_kind: str
+
+
+#: 策略注册表（§B2）：**只能**用它登记的名字，拼错会直接报错而不是静默跑别的。
+POLICIES: dict[str, PolicySpec] = {
+    "naive": PolicySpec("naive", "naive", "oracle"),
+    "retry_only": PolicySpec("retry_only", "retry_only", "oracle"),
+    "rule_oracle": PolicySpec("rule_oracle", "rule", "oracle"),
+    "rule_noisy": PolicySpec("rule_noisy", "rule", "noisy"),
+}
+
+
 def make_policy(name: str, config: AppConfig) -> Policy:
-    """按名字造策略。"""
-    if name == "naive":
+    """按名字造策略。未知名字抛 ValueError（不静默回退）。"""
+    spec = POLICIES.get(name)
+    if spec is None:
+        raise ValueError(f"未知策略 '{name}'，可用：{sorted(POLICIES)}")
+    limits = {
+        "max_install_calls": config.rule_policy.max_install_calls,
+        "max_resets_per_robot": config.rule_policy.max_resets_per_robot,
+        "max_unclear_retries": config.rule_policy.max_unclear_retries,
+        "max_carry_attempts": config.rule_policy.max_carry_attempts,
+        "max_human_asks": config.rule_policy.max_human_asks,
+    }
+    if spec.kind == "naive":
         return NaiveScriptPolicy()
-    if name.startswith("rule"):
-        limits = {
-            "max_install_calls": config.rule_policy.max_install_calls,
-            "max_resets_per_robot": config.rule_policy.max_resets_per_robot,
-            "max_unclear_retries": config.rule_policy.max_unclear_retries,
-            "max_carry_attempts": config.rule_policy.max_carry_attempts,
-            "max_human_asks": config.rule_policy.max_human_asks,
-        }
-        return RuleSelfHealPolicy(limits=limits)
-    raise ValueError(f"未知策略 '{name}'，可用：naive, rule")
+    if spec.kind == "retry_only":
+        return RetryOnlyPolicy(limits=limits)
+    return RuleSelfHealPolicy(limits=limits)
 
 
 def verifier_kind_for(policy_name: str) -> str:
-    """策略名决定用哪个验证器。"""
-    if policy_name.endswith("_noisy"):
-        return "noisy"
-    return "oracle"
+    """策略名决定用哪个验证器。未知名字抛 ValueError。"""
+    spec = POLICIES.get(policy_name)
+    if spec is None:
+        raise ValueError(f"未知策略 '{policy_name}'，可用：{sorted(POLICIES)}")
+    return spec.verifier_kind
 
 
 def build_info(config: AppConfig, episode: Episode) -> EpisodeInfo:
@@ -111,7 +134,10 @@ def run_episode(
 ) -> EpisodeResult:
     """跑一个 episode 并返回结果。"""
     chosen = policy if policy is not None else make_policy(policy_name, config)
-    kind = verifier_kind or verifier_kind_for(policy_name)
+    # 自定义策略（测试用）不在注册表里，此时用默认的 oracle 验证器。
+    kind = verifier_kind or (
+        verifier_kind_for(policy_name) if policy is None else "oracle"
+    )
     episode = make_episode(
         config,
         seed=seed,
@@ -196,8 +222,6 @@ def classify_outcome(
     if finish_call is None:
         if budget_aborted:
             return "ABORTED_BUDGET"
-        if max_steps_reached:
-            return "MAX_STEPS"
         return "MAX_STEPS"
     success = bool(finish_call.args.get("success"))
     if success and truth_ok:

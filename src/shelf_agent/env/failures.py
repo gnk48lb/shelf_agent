@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from ..config import FailureSkillConfig
-from ..utils.rng import derive_rng
+from ..utils.rng import STREAM_FAILURE, derive_rng
 
 #: 各类故障的默认参数。
 DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
@@ -65,13 +65,13 @@ class FailureModel(abc.ABC):
         return ScriptedFailureModel(script, fallback=fallback)
 
 
-def _choose_kind(rng: random.Random, weights: Mapping[str, float]) -> str:
-    """按权重抽一个故障类型。权重全为 0 时返回空串。"""
+def _choose_kind(u: float, weights: Mapping[str, float]) -> str:
+    """按权重抽一个故障类型。``u`` 是预先抽好的均匀随机数（消耗固定）。"""
     items = [(kind, float(w)) for kind, w in sorted(weights.items()) if w > 0]
     if not items:
         return ""
     total = sum(w for _, w in items)
-    threshold = rng.random() * total
+    threshold = u * total
     acc = 0.0
     for kind, weight in items:
         acc += weight
@@ -80,12 +80,24 @@ def _choose_kind(rng: random.Random, weights: Mapping[str, float]) -> str:
     return items[-1][0]
 
 
+def _progress_from_unit(u: float, missing: int) -> int:
+    """由均匀随机数推出进度，落在 ``[0, missing-1]``。"""
+    if missing <= 1:
+        return 0
+    return min(missing - 1, int(u * missing))
+
+
 class RandomFailureModel(FailureModel):
     """按概率随机注入故障。
 
-    每个技能一条独立随机流（``failure:<skill>``），每次调用先以 ``rate``
-    决定是否出事件，再按权重选类型。``rate`` 可按技能覆盖。
+    每个技能一条独立随机流（``failure:<skill>``），**每次调用无条件抽固定
+    3 个**均匀随机数（``u_event`` / ``u_kind`` / ``u_param``），分支只影响
+    怎么用这 3 个数，不影响抽几个——否则同一条流的后续位置会依赖上下文，
+    「第 n 次调用的故障命运」就不再与上下文无关（§B1）。
     """
+
+    #: 每次 ``next_event`` 无条件抽取的均匀随机数个数。
+    DRAWS_PER_EVENT = 3
 
     def __init__(
         self,
@@ -103,7 +115,7 @@ class RandomFailureModel(FailureModel):
     def _rng(self, skill: str) -> random.Random:
         rng = self._rngs.get(skill)
         if rng is None:
-            rng = derive_rng(self.seed, f"failure:{skill}")
+            rng = derive_rng(self.seed, f"{STREAM_FAILURE}{skill}")
             self._rngs[skill] = rng
         return rng
 
@@ -113,22 +125,24 @@ class RandomFailureModel(FailureModel):
         call_index: int,
         context: Mapping[str, Any] | None = None,
     ) -> FailureEvent | None:
+        rng = self._rng(skill)
+        # 无条件抽固定个数：即使这次不触发、即使技能没配置，也照抽。
+        u_event = rng.random()
+        u_kind = rng.random()
+        u_param = rng.random()
         cfg = self.skills.get(skill)
         rate = cfg.effective_rate(self.rate) if cfg else self.rate
-        if rate <= 0.0:
+        if u_event >= rate:
             return None
-        rng = self._rng(skill)
-        if rng.random() >= rate:
-            return None
-        kind = _choose_kind(rng, cfg.weights if cfg else {})
+        kind = _choose_kind(u_kind, cfg.weights if cfg else {})
         if not kind:
             return None
         params: dict[str, Any] = {}
         if kind == "TIMEOUT":
-            params["lost"] = rng.random() < self.p_lost
+            params["lost"] = u_param < self.p_lost
         elif kind in ("STUCK", "INCOMPLETE"):
             missing = int((context or {}).get("missing", 1))
-            params["progress"] = rng.randint(0, max(0, missing - 1))
+            params["progress"] = _progress_from_unit(u_param, missing)
         return FailureEvent(kind=kind, params=params)
 
 

@@ -66,7 +66,7 @@ def test_outcome_success() -> None:
     result = run_episode(
         CONFIG,
         seed=0,
-        policy_name="rule",
+        policy_name="rule_oracle",
         failure_script=SCENARIOS["happy"].failure_script,
         failure_rate=0.0,
         verifier_kind="oracle",
@@ -78,7 +78,7 @@ def test_outcome_false_finish() -> None:
     result = run_episode(
         CONFIG,
         seed=0,
-        policy_name="rule",
+        policy_name="rule_oracle",
         failure_script=SCENARIOS["verifier_false_positive"].failure_script,
         failure_rate=0.0,
         verifier_kind="scripted",
@@ -92,7 +92,7 @@ def test_outcome_safe_abort() -> None:
     result = run_episode(
         CONFIG,
         seed=0,
-        policy_name="rule",
+        policy_name="rule_oracle",
         failure_script=SCENARIOS["stuck_forever"].failure_script,
         failure_rate=0.0,
         verifier_kind="oracle",
@@ -152,7 +152,7 @@ def test_aggregate_and_counts() -> None:
         run_episode(
             CONFIG,
             seed=seed,
-            policy_name="rule",
+            policy_name="rule_oracle",
             failure_script=SCENARIOS["happy"].failure_script,
             failure_rate=0.0,
             verifier_kind="oracle",
@@ -178,7 +178,7 @@ def test_paired_comparison_uses_the_same_seeds() -> None:
             for seed in range(10)
         ]
 
-    comparison = paired_compare(run("rule"), run("naive"), "rule", "naive")
+    comparison = paired_compare(run("rule_oracle"), run("naive"), "rule_oracle", "naive")
     assert comparison["paired_seeds"] == 10
     assert comparison["wins"] + comparison["losses"] + comparison["ties"] == 10
     assert comparison["success_rate_right"] <= comparison["success_rate_left"]
@@ -225,7 +225,7 @@ def test_same_seed_produces_identical_episodes_jsonl(tmp_path: Path) -> None:
 
 def test_episode_jsonl_has_the_required_fields(tmp_path: Path) -> None:
     path = tmp_path / "episodes.jsonl"
-    result = run_episode(CONFIG, seed=0, policy_name="rule", failure_rate=0.0)
+    result = run_episode(CONFIG, seed=0, policy_name="rule_oracle", failure_rate=0.0)
     write_jsonl(path, [result.to_dict()])
     from shelf_agent.utils.jsonl import read_jsonl
 
@@ -285,7 +285,7 @@ def test_format_summary_markdown() -> None:
     from shelf_agent.eval.metrics import format_summary_markdown
 
     results = [
-        run_episode(CONFIG, seed=seed, policy_name="rule", failure_rate=0.0)
+        run_episode(CONFIG, seed=seed, policy_name="rule_oracle", failure_rate=0.0)
         for seed in range(3)
     ]
     summary = aggregate(results)

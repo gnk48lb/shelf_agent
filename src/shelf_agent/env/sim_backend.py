@@ -26,7 +26,12 @@ from ..contracts.types import (
 from ..perception.imagelib import ImageLibrary
 from ..perception.verifier import Verifier
 from ..utils.clock import VirtualClock
-from ..utils.rng import derive_rng
+from ..utils.rng import (
+    STREAM_DURATION,
+    STREAM_INSPECTOR_NOISE,
+    STREAM_VERIFIER_NOISE,
+    derive_rng,
+)
 from .failures import FailureModel
 from .human import ScriptedHuman
 from .world import BoxState, World
@@ -43,6 +48,21 @@ TOOL_FINISH = "finish"
 
 #: 箱子不在工位时的错误耗时（秒）。
 NOT_AT_STATION_DURATION_S = 1.0
+
+#: 工具返回的固定文案（§A1）。
+#:
+#: 物理技能的 message **只能取决于 status**——文案里不得出现任何隐藏状态
+#: （装没装满、散没散落、箱子在哪）。否则 agent 能从 message 里读出故障，
+#: 「必须验证才能发现隐藏故障」这个实验前提就没了。
+MSG_DONE = "done"
+MSG_TIMEOUT = "timeout"
+MSG_OK = "ok"
+
+#: 允许出现在 message 里的例外：相机直接观察到的事实（A5 的观测通道）。
+MSG_BOX_NOT_AT_STATION = "箱子不在工位，无法验证"
+
+#: 全部允许的文案（白名单；测试与文档共用这一份）。
+ALLOWED_MESSAGES = frozenset({MSG_DONE, MSG_TIMEOUT, MSG_OK, MSG_BOX_NOT_AT_STATION})
 
 
 @dataclass
@@ -95,6 +115,7 @@ class SimBackend:
         self.metrics = BackendMetrics()
         self._call_counts: dict[str, int] = {}
         self._rngs: dict[str, random.Random] = {}
+        self._last_event: dict[str, Any] | None = None
         self._handlers: dict[str, Callable[[Mapping[str, Any]], ToolResult]] = {
             TOOL_INSTALL: self._install,
             TOOL_HEAD_IMAGE: self._head_image,
@@ -110,6 +131,7 @@ class SimBackend:
 
     def invoke(self, tool: str, args: Mapping[str, Any]) -> ToolResult:
         """执行一次技能调用。未知工具返回 error，不抛异常。"""
+        self._last_event = None
         handler = self._handlers.get(tool)
         if handler is None:
             return ToolResult(
@@ -122,21 +144,52 @@ class SimBackend:
         return handler(args)
 
     def debug_truth(self) -> Mapping[str, Any]:
-        """真值快照——仅供评测与测试。"""
-        return self.world.debug_truth()
+        """真值快照——仅供评测与测试。
+
+        ``last_event`` 是本次调用注入的事件或前置违规原因，**只存在于真值通道**，
+        永远不进 ``ToolResult``（§A2）。
+        """
+        snapshot = dict(self.world.debug_truth())
+        snapshot["last_event"] = self._last_event
+        return snapshot
+
+    def _note_event(self, event: Any) -> None:
+        """记下本次注入的故障事件（真值通道）。"""
+        self._last_event = {
+            "type": "injected",
+            "kind": event.kind,
+            "params": dict(event.params),
+        }
+
+    def _note_precondition(self, reason: str) -> None:
+        """记下本次前置违规的原因（真值通道）。"""
+        self._last_event = {"type": "precondition", "reason": reason}
+
+    def _precondition_reason(self, robot: str, box: BoxState) -> str | None:
+        """前置是否满足；不满足时给出可读的原因（仅真值通道使用）。"""
+        if self.world.robot(robot) is not RobotState.OK:
+            return f"{robot}=FAULT"
+        if box.location is not BoxLocation.STATION:
+            return f"box_location={box.location.value}"
+        return None
 
     # --------------------------------------------------------------- 内部工具
 
-    def _rng(self, tool: str) -> random.Random:
-        rng = self._rngs.get(tool)
+    def _rng(self, name: str) -> random.Random:
+        """按流名取随机流（流命名规则见 ``utils/rng.py``）。"""
+        rng = self._rngs.get(name)
         if rng is None:
-            rng = derive_rng(self.seed, f"duration:{tool}")
-            self._rngs[tool] = rng
+            rng = derive_rng(self.seed, name)
+            self._rngs[name] = rng
         return rng
+
+    def _duration_rng(self, tool: str) -> random.Random:
+        """耗时抖动流：``duration:<tool>``。"""
+        return self._rng(f"{STREAM_DURATION}{tool}")
 
     def _sample_duration(self, tool: str) -> float:
         spec = self.spec.get(tool)
-        return spec.duration.sample(self._rng(tool))
+        return spec.duration.sample(self._duration_rng(tool))
 
     def _next_event(self, tool: str, context: Mapping[str, Any] | None = None):
         index = self._call_counts.get(tool, 1) - 1
@@ -162,48 +215,49 @@ class SimBackend:
         spec = self.spec.get(TOOL_INSTALL)
         box = self._box_for(args)
         missing = self.target - box.inside
-        if self.world.robot("robot1") is not RobotState.OK or box.location is not BoxLocation.STATION:
-            return self._timeout_result(
-                TOOL_INSTALL, "robot1 未就绪或箱子不在工位，技能卡住"
-            )
+        reason = self._precondition_reason("robot1", box)
+        if reason is not None:
+            self._note_precondition(reason)
+            return self._timeout_result(TOOL_INSTALL, MSG_TIMEOUT)
         event = self._next_event(TOOL_INSTALL, {"missing": missing})
         if event is None or missing <= 0:
             box.inside = self.target
             duration = self._sample_duration(TOOL_INSTALL)
             self.clock.advance(duration)
-            return ToolResult(status="done", message="补装完成", duration_s=duration)
+            return ToolResult(status="done", message=MSG_DONE, duration_s=duration)
+        self._note_event(event)
         kind = event.kind
         if kind == "STUCK":
             box.inside += int(event.params.get("progress", 0))
             self.world.set_robot("robot1", RobotState.FAULT)
             self.clock.advance(spec.timeout_s)
             self.metrics.n_timeouts += 1
-            return ToolResult(status="timeout", message="robot1 卡住", duration_s=spec.timeout_s)
+            return ToolResult(status="timeout", message=MSG_TIMEOUT, duration_s=spec.timeout_s)
         if kind == "INCOMPLETE":
             box.inside += int(event.params.get("progress", 0))
             duration = self._sample_duration(TOOL_INSTALL)
             self.clock.advance(duration)
-            return ToolResult(status="done", message="补装未达目标数", duration_s=duration)
+            return ToolResult(status="done", message=MSG_DONE, duration_s=duration)
         if kind == "STRAY":
             box.inside = self.target - 1
             box.outside += 1
             duration = self._sample_duration(TOOL_INSTALL)
             self.clock.advance(duration)
-            return ToolResult(status="done", message="最后一颗掉在箱外", duration_s=duration)
+            return ToolResult(status="done", message=MSG_DONE, duration_s=duration)
         # 未知故障类型：按无事件处理。
         box.inside = self.target
         duration = self._sample_duration(TOOL_INSTALL)
         self.clock.advance(duration)
-        return ToolResult(status="done", message="补装完成", duration_s=duration)
+        return ToolResult(status="done", message=MSG_DONE, duration_s=duration)
 
     def _carry(self, args: Mapping[str, Any]) -> ToolResult:
         """二号机器人把箱子搬到货架。"""
         spec = self.spec.get(TOOL_CARRY)
         box = self._box_for(args)
-        if self.world.robot("robot2") is not RobotState.OK or box.location is not BoxLocation.STATION:
-            return self._timeout_result(
-                TOOL_CARRY, "robot2 未就绪或箱子不在工位，技能卡住"
-            )
+        reason = self._precondition_reason("robot2", box)
+        if reason is not None:
+            self._note_precondition(reason)
+            return self._timeout_result(TOOL_CARRY, MSG_TIMEOUT)
         event = self._next_event(TOOL_CARRY)
         if event is None or event.kind not in ("TIMEOUT", "SILENT_FAIL"):
             # 无事件（或未知故障类型）：正常搬运。
@@ -212,15 +266,15 @@ class SimBackend:
             slot = self.world.place_on_shelf(box.box_id, args.get("slot_id"))
             if slot is None:
                 self.world.set_robot("robot2", RobotState.FAULT)
+                self._note_precondition("no_free_slot")
                 self.clock.advance(spec.timeout_s)
                 self.metrics.n_timeouts += 1
-                return ToolResult(
-                    status="timeout", message="货架没有空槽，箱子仍在工位", duration_s=spec.timeout_s
-                )
+                return ToolResult(status="timeout", message=MSG_TIMEOUT, duration_s=spec.timeout_s)
             box.location = BoxLocation.SHELF
             duration = self._sample_duration(TOOL_CARRY)
             self.clock.advance(duration)
-            return ToolResult(status="done", message="搬运完成", duration_s=duration)
+            return ToolResult(status="done", message=MSG_DONE, duration_s=duration)
+        self._note_event(event)
         kind = event.kind
         if kind == "TIMEOUT":
             self.world.set_robot("robot2", RobotState.FAULT)
@@ -229,11 +283,11 @@ class SimBackend:
                 box.location = BoxLocation.LOST
             self.clock.advance(spec.timeout_s)
             self.metrics.n_timeouts += 1
-            return ToolResult(status="timeout", message="robot2 搬运超时", duration_s=spec.timeout_s)
+            return ToolResult(status="timeout", message=MSG_TIMEOUT, duration_s=spec.timeout_s)
         # SILENT_FAIL：返回 done，但箱子仍在工位。
         duration = self._sample_duration(TOOL_CARRY)
         self.clock.advance(duration)
-        return ToolResult(status="done", message="搬运完成", duration_s=duration)
+        return ToolResult(status="done", message=MSG_DONE, duration_s=duration)
 
     def _verify(self, args: Mapping[str, Any]) -> ToolResult:
         """拍照并用验证器检查箱子。"""
@@ -243,14 +297,14 @@ class SimBackend:
             return ToolResult(
                 status="error",
                 error_code=ERR_BOX_NOT_AT_STATION,
-                message="箱子不在工位，无法验证",
+                message=MSG_BOX_NOT_AT_STATION,
                 duration_s=NOT_AT_STATION_DURATION_S,
             )
         image = self.images.capture({"inside": box.inside, "outside": box.outside})
-        report = self.verifier.verify(image, self._rng(TOOL_VERIFY))
+        report = self.verifier.verify(image, self._rng(STREAM_VERIFIER_NOISE))
         duration = self.spec.get(TOOL_VERIFY).duration.mean_s
         self.clock.advance(duration)
-        return ToolResult(status="ok", message="验证完成", duration_s=duration, data=report.to_dict())
+        return ToolResult(status="ok", message=MSG_OK, duration_s=duration, data=report.to_dict())
 
     def _head_image(self, args: Mapping[str, Any]) -> ToolResult:
         """头部相机拍照，只返回图像引用。"""
@@ -260,13 +314,13 @@ class SimBackend:
             return ToolResult(
                 status="error",
                 error_code=ERR_BOX_NOT_AT_STATION,
-                message="箱子不在工位，拍不到箱内",
+                message=MSG_BOX_NOT_AT_STATION,
                 duration_s=NOT_AT_STATION_DURATION_S,
             )
         image = self.images.capture({"inside": box.inside, "outside": box.outside})
         duration = self.spec.get(TOOL_HEAD_IMAGE).duration.mean_s
         self.clock.advance(duration)
-        return ToolResult(status="ok", message="已拍照", duration_s=duration, data=image.public())
+        return ToolResult(status="ok", message=MSG_OK, duration_s=duration, data=image.public())
 
     def _reset(self, args: Mapping[str, Any]) -> ToolResult:
         """机器人复位。永不失败，不改变箱子。"""
@@ -277,13 +331,15 @@ class SimBackend:
         else:
             targets = [target]
         duration = self._reset_duration(spec, target, targets)
+        # 「不必要」按**调用**计：只有所有目标机器人此前都是 OK 才算一次（§B3）。
+        all_ok = all(self.world.robot(name) is RobotState.OK for name in targets)
         for name in targets:
-            if self.world.robot(name) is RobotState.OK:
-                self.metrics.n_unnecessary_resets += 1
             self.world.set_robot(name, RobotState.OK)
+        if all_ok:
+            self.metrics.n_unnecessary_resets += 1
         self.metrics.n_resets += 1
         self.clock.advance(duration)
-        return ToolResult(status="ok", message=f"{target} 已复位", duration_s=duration)
+        return ToolResult(status="ok", message=MSG_OK, duration_s=duration)
 
     def _reset_duration(self, spec: ToolSpec, target: str, targets: list[str]) -> float:
         durations = spec.reset_durations
@@ -298,13 +354,13 @@ class SimBackend:
         duration = float(inspector.duration_s)
         self.clock.advance(duration)
         if inspector.mode != "shelf_status":
-            return ToolResult(status="done", message="巡检完成（noop）", duration_s=duration)
+            return ToolResult(status="done", message=MSG_DONE, duration_s=duration)
         on_shelf = any(box.location is BoxLocation.SHELF for box in self.world.boxes.values())
-        if inspector.false_negative > 0 and self._rng(TOOL_INSPECTOR).random() < inspector.false_negative:
+        if inspector.false_negative > 0 and self._rng(STREAM_INSPECTOR_NOISE).random() < inspector.false_negative:
             on_shelf = False
         return ToolResult(
             status="done",
-            message="巡检完成",
+            message=MSG_DONE,
             duration_s=duration,
             data={"box_on_shelf": on_shelf},
         )
@@ -330,4 +386,4 @@ class SimBackend:
 
     def _finish(self, args: Mapping[str, Any]) -> ToolResult:
         """结束 episode。成功与否由评测按真值判定。"""
-        return ToolResult(status="ok", message="已结束", duration_s=0.0)
+        return ToolResult(status="ok", message=MSG_OK, duration_s=0.0)

@@ -13,6 +13,13 @@ from shelf_agent.agents.rule_selfheal import RuleSelfHealPolicy
 from shelf_agent.config import load_config
 from shelf_agent.contracts.spec import build_spec_set
 from shelf_agent.contracts.types import EpisodeInfo, ToolCall, ToolResult
+from shelf_agent.env.sim_backend import (
+    ALLOWED_MESSAGES,
+    MSG_BOX_NOT_AT_STATION,
+    MSG_DONE,
+    MSG_OK,
+    MSG_TIMEOUT,
+)
 from shelf_agent.eval.runner import run_episode
 from shelf_agent.eval.scenarios import SCENARIOS, Scenario
 
@@ -61,7 +68,7 @@ ALLOWED_TOKEN_CODES = frozenset({"BOX_NOT_AT_STATION"})
 class RecordingPolicy:
     """记录策略收到的全部输入，用来检查有没有泄漏。"""
 
-    name = "rule"
+    name = "rule_oracle"
 
     def __init__(self) -> None:
         self.info: EpisodeInfo | None = None
@@ -123,7 +130,7 @@ def _run_scenario(name: str) -> RecordingPolicy:
     run_episode(
         CONFIG,
         seed=0,
-        policy_name="rule",
+        policy_name="rule_oracle",
         policy=recorder,
         failure_script=scenario.failure_script,
         failure_rate=scenario.failure_rate,
@@ -178,7 +185,7 @@ def test_truth_snapshot_only_lives_in_the_trajectory(name: str) -> None:
     result = run_episode(
         CONFIG,
         seed=0,
-        policy_name="rule",
+        policy_name="rule_oracle",
         failure_script=scenario.failure_script,
         failure_rate=scenario.failure_rate,
         verifier_kind=scenario.verifier_kind,
@@ -198,3 +205,23 @@ def test_contract_documents_do_not_leak_values() -> None:
         for text in list(tool.preconditions) + list(tool.effects) + [tool.description]:
             for token in TRUTH_ONLY_TOKENS:
                 assert token not in text, f"契约文本里出现真值 token '{token}'：{text!r}"
+
+
+@pytest.mark.parametrize("name", sorted(SCENARIOS))
+def test_policy_only_sees_allowed_messages(name: str) -> None:
+    """message 只能取自白名单（文案只取决于 status，见 §A1）。"""
+    recorder = _run_scenario(name)
+    for entry in _result_payloads(recorder):
+        result = entry["result"]
+        if entry["call"]["name"] == "ask_human":
+            continue  # 人类说的话，本来就会因情况而异
+        if result.get("error_code") in {
+            "UNKNOWN_TOOL",
+            "INVALID_ARGS",
+            "BUDGET_EXCEEDED",
+            "MAX_STEPS",
+            "EPISODE_FINISHED",
+        }:
+            continue  # executor 层的错误
+        message = result.get("message") or ""
+        assert message in ALLOWED_MESSAGES, f"出现了白名单之外的文案：{message!r}"

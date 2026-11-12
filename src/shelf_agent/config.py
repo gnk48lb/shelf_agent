@@ -18,6 +18,15 @@ import yaml
 #: 契约版本号，纳入 config_hash（A13）。
 CONTRACT_VERSION = "1"
 
+#: 各技能已知的故障类型（配置里的权重只能用这些键；拼错会被静默忽略）。
+KNOWN_FAILURE_KINDS: dict[str, frozenset[str]] = {
+    "robot1_install_screws": frozenset({"STUCK", "INCOMPLETE", "STRAY"}),
+    "robot2_carry_box": frozenset({"TIMEOUT", "SILENT_FAIL"}),
+}
+
+#: 合法的验证器类型。
+VERIFIER_KINDS = ("oracle", "noisy", "scripted")
+
 #: 仓库根目录（src/shelf_agent/config.py 的上两级）。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -189,6 +198,22 @@ def _num(raw: Mapping[str, Any], name: str, default: float) -> float:
     return float(value)
 
 
+def _probability(raw: Mapping[str, Any], name: str, path: str, default: float) -> float:
+    """概率字段：必须在 [0, 1] 内。"""
+    value = _num(raw, name, default)
+    if not 0.0 <= value <= 1.0:
+        raise ConfigError(f"字段 '{path}' 必须是 [0, 1] 之间的概率，实际是 {value}")
+    return value
+
+
+def _at_least(raw: Mapping[str, Any], name: str, path: str, default: int, minimum: int) -> int:
+    """整数字段：不得小于下界。"""
+    value = _int(raw, name, default)
+    if value < minimum:
+        raise ConfigError(f"字段 '{path}' 必须 >= {minimum}，实际是 {value}")
+    return value
+
+
 def _int(raw: Mapping[str, Any], name: str, default: int) -> int:
     value = raw.get(name, default)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -205,40 +230,56 @@ def _str(raw: Mapping[str, Any], name: str, default: str) -> str:
 
 def _build_failures(raw: Mapping[str, Any]) -> FailuresConfig:
     section = _section(raw, "failures")
+    rate = _probability(section, "rate", "failures.rate", 0.0)
+    p_lost = _probability(section, "p_lost", "failures.p_lost", 0.0)
     skills: dict[str, FailureSkillConfig] = {}
     for name, spec in (section.get("skills") or {}).items():
+        path = f"failures.skills.'{name}'"
         if not isinstance(spec, dict):
-            raise ConfigError(f"failures.skills.'{name}' 必须是映射")
-        rate = spec.get("rate")
-        if rate is not None and (isinstance(rate, bool) or not isinstance(rate, (int, float))):
-            raise ConfigError(f"failures.skills.'{name}'.rate 必须是数值或 null")
+            raise ConfigError(f"{path} 必须是映射")
+        skill_rate = spec.get("rate")
+        if skill_rate is not None:
+            if isinstance(skill_rate, bool) or not isinstance(skill_rate, (int, float)):
+                raise ConfigError(f"{path}.rate 必须是数值或 null")
+            if not 0.0 <= float(skill_rate) <= 1.0:
+                raise ConfigError(
+                    f"{path}.rate 必须是 [0, 1] 之间的概率，实际是 {skill_rate}"
+                )
         weights = spec.get("weights") or {}
         if not isinstance(weights, dict):
-            raise ConfigError(f"failures.skills.'{name}'.weights 必须是映射")
+            raise ConfigError(f"{path}.weights 必须是映射")
+        known = KNOWN_FAILURE_KINDS.get(name)
         for key, w in weights.items():
             if isinstance(w, bool) or not isinstance(w, (int, float)):
-                raise ConfigError(f"failures.skills.'{name}'.weights.'{key}' 必须是数值")
+                raise ConfigError(f"{path}.weights.'{key}' 必须是数值")
             if w < 0:
-                raise ConfigError(f"failures.skills.'{name}'.weights.'{key}' 不能为负")
-        skills[name] = FailureSkillConfig(rate=rate, weights=dict(weights))
-    return FailuresConfig(
-        rate=_num(section, "rate", 0.0),
-        skills=skills,
-        p_lost=_num(section, "p_lost", 0.0),
-    )
+                raise ConfigError(f"{path}.weights.'{key}' 不能为负")
+            if known is not None and key not in known:
+                raise ConfigError(
+                    f"{path}.weights 含未知故障类型 '{key}'，{name} 可用：{sorted(known)}"
+                )
+        if weights and sum(float(w) for w in weights.values()) <= 0:
+            raise ConfigError(f"{path}.weights 的权重和必须 > 0")
+        skills[name] = FailureSkillConfig(rate=skill_rate, weights=dict(weights))
+    return FailuresConfig(rate=rate, skills=skills, p_lost=p_lost)
 
 
 def _build_verifier(raw: Mapping[str, Any]) -> VerifierConfig:
     section = _section(raw, "verifier")
+    kind = _str(section, "kind", "noisy")
+    if kind not in VERIFIER_KINDS:
+        raise ConfigError(
+            f"字段 'verifier.kind' 必须是 {sorted(VERIFIER_KINDS)} 之一，实际是 '{kind}'"
+        )
     reports = section.get("scripted_reports") or []
     if not isinstance(reports, list):
         raise ConfigError("verifier.scripted_reports 必须是列表")
     return VerifierConfig(
-        kind=_str(section, "kind", "noisy"),
-        p_inside_correct=_num(section, "p_inside_correct", 0.95),
-        boundary_confusion=_num(section, "boundary_confusion", 0.10),
-        p_unclear=_num(section, "p_unclear", 0.03),
-        p_outside_miss=_num(section, "p_outside_miss", 0.05),
+        kind=kind,
+        p_inside_correct=_probability(section, "p_inside_correct", "verifier.p_inside_correct", 0.95),
+        boundary_confusion=_probability(section, "boundary_confusion", "verifier.boundary_confusion", 0.10),
+        p_unclear=_probability(section, "p_unclear", "verifier.p_unclear", 0.03),
+        p_outside_miss=_probability(section, "p_outside_miss", "verifier.p_outside_miss", 0.05),
         confusion_table_path=section.get("confusion_table"),
         scripted_reports=list(reports),
     )
@@ -271,20 +312,34 @@ def build_config(raw: Mapping[str, Any], source_path: Path | None = None) -> App
         ),
         inspector=InspectorConfig(
             mode=inspector_mode,
-            false_negative=_num(inspector_section, "false_negative", 0.0),
+            false_negative=_probability(
+                inspector_section, "false_negative", "inspector.false_negative", 0.0
+            ),
             duration_s=_num(inspector_section, "duration_s", 40.0),
         ),
         budget=BudgetConfig(
-            soft_limit=_int(budget_section, "soft_limit", 40),
-            hard_extra=_int(budget_section, "hard_extra", 3),
-            max_invalid_calls=_int(budget_section, "max_invalid_calls", 10),
+            soft_limit=_at_least(budget_section, "soft_limit", "budget.soft_limit", 40, 1),
+            hard_extra=_at_least(budget_section, "hard_extra", "budget.hard_extra", 3, 0),
+            max_invalid_calls=_at_least(
+                budget_section, "max_invalid_calls", "budget.max_invalid_calls", 10, 1
+            ),
         ),
         rule_policy=RulePolicyConfig(
-            max_install_calls=_int(rule_section, "max_install_calls", 6),
-            max_resets_per_robot=_int(rule_section, "max_resets_per_robot", 3),
-            max_unclear_retries=_int(rule_section, "max_unclear_retries", 2),
-            max_carry_attempts=_int(rule_section, "max_carry_attempts", 3),
-            max_human_asks=_int(rule_section, "max_human_asks", 2),
+            max_install_calls=_at_least(
+                rule_section, "max_install_calls", "rule_policy.max_install_calls", 6, 0
+            ),
+            max_resets_per_robot=_at_least(
+                rule_section, "max_resets_per_robot", "rule_policy.max_resets_per_robot", 3, 0
+            ),
+            max_unclear_retries=_at_least(
+                rule_section, "max_unclear_retries", "rule_policy.max_unclear_retries", 2, 0
+            ),
+            max_carry_attempts=_at_least(
+                rule_section, "max_carry_attempts", "rule_policy.max_carry_attempts", 3, 0
+            ),
+            max_human_asks=_at_least(
+                rule_section, "max_human_asks", "rule_policy.max_human_asks", 2, 0
+            ),
         ),
         source_path=source_path,
     )
