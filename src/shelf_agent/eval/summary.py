@@ -102,7 +102,7 @@ def render_verifier_markdown(
         "",
         "| level | policy | episodes | SUCCESS | FALSE_FINISH | 误放行率 95% CI | "
         "unsafe_release | 误放行率 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         lines.append(

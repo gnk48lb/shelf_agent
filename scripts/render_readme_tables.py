@@ -102,7 +102,7 @@ def _verifier_table(path: Path) -> str:
     lines = [
         "| level | policy | episodes | SUCCESS | FALSE_FINISH | 误放行率 95% CI | "
         "unsafe_release | 误放行率 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|",
     ]
     with path.open("r", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):

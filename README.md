@@ -339,7 +339,7 @@ uv run python -m shelf_agent.eval.cli sweep-verifier --config configs/real_screw
 （`p_inside_correct` / `p_unclear` 保持配置值）。
 
 | level | policy | episodes | SUCCESS | FALSE_FINISH | 误放行率 95% CI | unsafe_release | 误放行率 |
-|---|---|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|---|
 | 0.0 | retry_only | 200 | 138 | 53 | [0.2087, 0.3302] | 0.135 | 0.2650 |
 | 0.0 | rule_noisy | 200 | 196 | 0 | [0.0000, 0.0188] | 0.0 | 0.0000 |
 | 0.0 | rule_oracle | 200 | 196 | 0 | [0.0000, 0.0188] | 0.0 | 0.0000 |
