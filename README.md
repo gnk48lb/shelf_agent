@@ -20,8 +20,28 @@ uv sync --extra dev          # 首次安装依赖（uv 不可用时见 §8）
 uv run pytest -q             # 全量离线单测
 uv run python -m shelf_agent.eval.cli demo --scenario stuck_once --show-truth
 uv run python -m shelf_agent.eval.cli sweep --config configs/real_screw.yaml --seeds 100 \
-    --failure-rates 0,0.05,0.1,0.2,0.3 --policies naive,rule_oracle,rule_noisy --out results/
+    --failure-rates 0,0.05,0.1,0.2,0.3 --policies naive,retry_only,rule_oracle,rule_noisy --out results/
 ```
+
+### 组会演示（3 条命令 + 2 张图）
+
+```bash
+# ① 机器人卡住 → reset → 补装 → 上架（时间线里能看到 [注入] STUCK 这类真值标注）
+uv run python -m shelf_agent.eval.cli demo --scenario stuck_once --show-truth
+
+# ② 搬运「静默失败」：carry 返回 done，但箱子还在工位；POST_CHECK 靠再验证一次发现
+uv run python -m shelf_agent.eval.cli demo --scenario carry_silent_fail_detected --show-truth
+
+# ③ 验证器误报完成 → 策略把不完整的箱子搬上货架 → FALSE_FINISH
+uv run python -m shelf_agent.eval.cli demo --scenario verifier_false_positive --show-truth
+```
+
+- **图 1**：`results/success_vs_failure_rate.png`——左图是成功率随故障注入率的变化（Wilson 区间），
+  右图是误放行与不安全放行比例。**想说明的是**：不做自愈的 `naive` 会随故障率崩掉，
+  而「重试 + 验证 + 求助」这条链路几乎不受影响；代价是时间。
+- **图 2**：`results/verifier/verifier_sweep.png`——误放行率随**验证器噪声档位**的变化。
+  **想说明的是**：验证器质量是端到端成功率的独立风险来源，规则策略挡不住「误报完成」，
+  这一点在 §7.1 的默认噪声下（100 seed）看不出来。
 
 ---
 
@@ -120,12 +140,22 @@ shelf_agent/
 `error_code`）。**install / carry 的返回只有 status 与耗时，不带任何状态信息**——箱子到底搬没搬
 成功，只能靠再验证一次来推断（这正是 `POST_CHECK` 存在的理由）。
 
+**message 也只取决于 status**（A27）：物理技能 `done → "done"`、`timeout → "timeout"`；
+`reset` / `verify_box` 成功 / `finish → "ok"`；`inspector_run → "done"`。例外只有两处：
+`BOX_NOT_AT_STATION` 的文案（相机直接观察到的事实）与 `ask_human` 的回答（人说的话）。
+**文案里不出现任何隐藏状态**（装没装满、散没散落、箱子在哪）——否则 agent 能从 message 里
+读出故障，「必须验证才能发现隐藏故障」这个实验前提就没了。
+守卫：`tests/test_observation_invariance.py`（同一 status 下不同隐藏状态产生逐字相同的观测）
+与 `tests/test_no_leak.py::test_policy_only_sees_allowed_messages`（文案白名单）。
+
 ---
 
 ## 4. 故障表
 
 每个技能一条**独立随机流**（`sha256(f"{seed}:{stream}")` 派生），保证「换策略不会改变某技能
-第 n 次调用的故障命运」。
+第 n 次调用的故障命运」。**这条不变量靠「每次调用抽取的随机数个数固定」保证**（A28）：故障模型
+每次无条件抽 3 个均匀随机数、验证器每次无条件抽 5 个，分支只决定怎么用、不决定抽几个；否则
+同一条流的后续位置会依赖上下文。守卫：`tests/test_random_stream_purity.py`。
 
 | 故障类型 | 触发技能 | 语义 | 权重（默认） |
 |---|---|---|---|
@@ -227,12 +257,14 @@ flowchart TD
 
 ## 7. 真实 sweep 结果
 
-以下数字**全部来自实际运行**，命令与 seed 数如下（可复现）：
+以下数字**全部来自实际运行**（命令与 seed 数一并给出，可复现）。
+
+### 7.1 故障率扫描
 
 ```bash
 uv run python -m shelf_agent.eval.cli sweep --config configs/real_screw.yaml \
     --seeds 100 --failure-rates 0,0.05,0.1,0.2,0.3 \
-    --policies naive,rule_oracle,rule_noisy --out results/
+    --policies naive,retry_only,rule_oracle,rule_noisy --out results/
 ```
 
 配置：`configs/real_screw.yaml`（N=6，故障权重 STUCK 0.4 / INCOMPLETE 0.4 / STRAY 0.2，
@@ -241,51 +273,93 @@ carry TIMEOUT 0.5 / SILENT_FAIL 0.5，`p_lost=0.3`）。每个故障率 × 每�
 
 | failure_rate | policy | SUCCESS | FALSE_FINISH | SAFE_ABORT | SUCCESS 95% CI | unsafe_release | makespan_s (mean±se) | 求助次数 |
 |---|---|---|---|---|---|---|---|---|
-| 0.0 | naive | 100 | 0 | 0 | [0.963, 1.000] | 0.00 | 104.6±0.8 | 0.00 |
-| 0.0 | rule_oracle | 100 | 0 | 0 | [0.963, 1.000] | 0.00 | 108.6±0.8 | 0.00 |
-| 0.0 | rule_noisy | 100 | 0 | 0 | [0.963, 1.000] | 0.00 | 111.0±1.8 | 0.00 |
+| 0.0 | naive | 100 | 0 | 0 | [0.963, 1.000] | 0.0 | 104.6±0.8 | 0.00 |
+| 0.0 | retry_only | 100 | 0 | 0 | [0.963, 1.000] | 0.0 | 104.6±0.8 | 0.00 |
+| 0.0 | rule_noisy | 100 | 0 | 0 | [0.963, 1.000] | 0.0 | 110.0±1.1 | 0.00 |
+| 0.0 | rule_oracle | 100 | 0 | 0 | [0.963, 1.000] | 0.0 | 108.6±0.8 | 0.00 |
 | 0.05 | naive | 86 | 14 | 0 | [0.779, 0.915] | 0.07 | 114.0±3.2 | 0.00 |
-| 0.05 | rule_oracle | 100 | 0 | 0 | [0.963, 1.000] | 0.00 | 131.9±6.8 | 0.03 |
-| 0.05 | rule_noisy | 100 | 0 | 0 | [0.963, 1.000] | 0.00 | 135.3±7.0 | 0.03 |
+| 0.05 | retry_only | 93 | 5 | 2 | [0.863, 0.966] | 0.04 | 128.6±9.2 | 0.00 |
+| 0.05 | rule_noisy | 100 | 0 | 0 | [0.963, 1.000] | 0.0 | 133.9±7.1 | 0.03 |
+| 0.05 | rule_oracle | 100 | 0 | 0 | [0.963, 1.000] | 0.0 | 131.9±6.8 | 0.03 |
 | 0.1 | naive | 78 | 22 | 0 | [0.689, 0.850] | 0.12 | 118.6±3.7 | 0.00 |
-| 0.1 | rule_oracle | 100 | 0 | 0 | [0.963, 1.000] | 0.00 | 146.1±8.9 | 0.05 |
-| 0.1 | rule_noisy | 100 | 0 | 0 | [0.963, 1.000] | 0.00 | 149.4±9.0 | 0.05 |
+| 0.1 | retry_only | 89 | 8 | 3 | [0.814, 0.937] | 0.06 | 140.7±11.0 | 0.00 |
+| 0.1 | rule_noisy | 100 | 0 | 0 | [0.963, 1.000] | 0.0 | 148.0±9.0 | 0.05 |
+| 0.1 | rule_oracle | 100 | 0 | 0 | [0.963, 1.000] | 0.0 | 146.1±8.9 | 0.05 |
 | 0.2 | naive | 68 | 32 | 0 | [0.583, 0.763] | 0.15 | 123.0±4.1 | 0.00 |
-| 0.2 | rule_oracle | 100 | 0 | 0 | [0.963, 1.000] | 0.00 | 164.4±10.6 | 0.07 |
-| 0.2 | rule_noisy | 100 | 0 | 0 | [0.963, 1.000] | 0.00 | 166.4±10.7 | 0.07 |
+| 0.2 | retry_only | 81 | 16 | 3 | [0.722, 0.875] | 0.1 | 149.8±11.6 | 0.00 |
+| 0.2 | rule_noisy | 100 | 0 | 0 | [0.963, 1.000] | 0.0 | 172.2±11.6 | 0.08 |
+| 0.2 | rule_oracle | 100 | 0 | 0 | [0.963, 1.000] | 0.0 | 169.8±11.5 | 0.08 |
 | 0.3 | naive | 52 | 48 | 0 | [0.423, 0.615] | 0.21 | 133.3±4.8 | 0.00 |
-| 0.3 | rule_oracle | 99 | 0 | 1 | [0.946, 0.998] | 0.00 | 201.9±13.3 | 0.12 |
-| 0.3 | rule_noisy | 99 | 0 | 1 | [0.946, 0.998] | 0.00 | 203.7±13.3 | 0.12 |
+| 0.3 | retry_only | 73 | 24 | 3 | [0.636, 0.807] | 0.14 | 172.2±13.1 | 0.00 |
+| 0.3 | rule_noisy | 99 | 0 | 1 | [0.946, 0.998] | 0.0 | 207.3±14.2 | 0.12 |
+| 0.3 | rule_oracle | 99 | 0 | 1 | [0.946, 0.998] | 0.0 | 204.8±14.1 | 0.12 |
 
 **配对比较**（同 seed，胜 = 左策略成功而右策略失败）：
 
-| failure_rate | naive vs rule_noisy | rule_oracle vs rule_noisy |
-|---|---|---|
-| 0.0 | 胜 0 / 负 0 / 平 100 | 胜 0 / 负 0 / 平 100 |
-| 0.05 | 胜 0 / 负 14 / 平 86 | 胜 0 / 负 0 / 平 100 |
-| 0.1 | 胜 0 / 负 22 / 平 78 | 胜 0 / 负 0 / 平 100 |
-| 0.2 | 胜 0 / 负 32 / 平 68 | 胜 0 / 负 0 / 平 100 |
-| 0.3 | 胜 0 / 负 47 / 平 53 | 胜 0 / 负 0 / 平 100 |
+| failure_rate | naive vs rule_noisy | retry_only vs rule_noisy | rule_oracle vs rule_noisy |
+|---|---|---|---|
+| 0.0 | 胜 0 / 负 0 / 平 100 | 胜 0 / 负 0 / 平 100 | 胜 0 / 负 0 / 平 100 |
+| 0.05 | 胜 0 / 负 14 / 平 86 | 胜 0 / 负 7 / 平 93 | 胜 0 / 负 0 / 平 100 |
+| 0.1 | 胜 0 / 负 22 / 平 78 | 胜 0 / 负 11 / 平 89 | 胜 0 / 负 0 / 平 100 |
+| 0.2 | 胜 0 / 负 32 / 平 68 | 胜 0 / 负 19 / 平 81 | 胜 0 / 负 0 / 平 100 |
+| 0.3 | 胜 0 / 负 47 / 平 53 | 胜 0 / 负 26 / 平 74 | 胜 0 / 负 0 / 平 100 |
 
 **怎么读这张表**：
 
-1. **自愈是有效的，而且差距随故障率拉开**：`naive`（不验证、不重试）的成功率从 100%
-   掉到 52%，`rule` 则在 0.3 的故障率下仍有 99%。失败全部来自「不完整的箱子被搬到货架」
-   ——也就是 `FALSE_FINISH`（谎报成功）与 `unsafe_release`（不安全放行）。
-2. **代价是时间**：故障率 0.3 时 `rule` 的 makespan 从 ~109 s 涨到 ~202 s（reset 重试、
-   重新验证、求助人类都要花仿真时间）。成功率换时间，这是自愈的账。
-3. **验证器噪声几乎没有影响**：`rule_oracle` 与 `rule_noisy` 逐 seed 完全一致（100 个 seed
-   全部打平）。原因很直接——策略**每次搬运前都重新验证**，单次误报被下一次验证挡住。
-   这条结论只在「策略坚持验证」的前提下成立；`naive` 的 48 次 `FALSE_FINISH` 正是反面。
-4. **唯一的 SAFE_ABORT**：故障率 0.3 时有 1 个 episode 限额耗尽后诚实放弃
-   （`finish(False)`），符合「宁可失败也不谎报」的设定。
+1. **自愈是有效的，而且差距随故障率拉开**：`naive`（不验证、不重试）随故障率直线下滑；
+   `retry_only`（只超时重试、不验证）能扛住 STUCK / 搬运超时，但扛不住「装少了 / 散落了 /
+   静默失败」——因为那三种故障**返回的就是 `done`**，不看验证器就发现不了；`rule`（重试 +
+   验证 + 求助）在最高故障率下仍保持高成功率。
+2. **代价是时间**：故障率越高，`rule` 的 makespan 越长（reset 重试、重新验证、求助人类都要花
+   仿真时间）。成功率换时间，这是自愈的账。
+3. **验证器噪声的影响要看 §7.2，不能从 §7.1 读出来**：默认噪声参数下 `rule_oracle` 与
+   `rule_noisy` 在 100 seed 里分不出差别，但这**只是样本量不够**，不是「噪声没有影响」。
+   原因要说准：策略在搬运前**只验证一次**，一次「误报完成」会直接放行；搬运之后箱子离开工位，
+   `POST_CHECK` 只会拿到 `BOX_NOT_AT_STATION`，**没有任何环节会再看箱内**。所以单次误报不会被
+   「下一次验证」挡住——只有在故障把箱子留在工位、策略回到 `VERIFY` 时，误报才有机会被纠正。
+4. **`FALSE_FINISH` 与 `unsafe_release` 是两回事**：前者是「谎报成功」（策略说做成了），
+   后者是「不完整的箱子真的被搬上了货架」。naive 的 48 次 `FALSE_FINISH` 同时伴随
+   `unsafe_release` 上升，因为它的搬运根本不检查箱内。
 5. **图**：`results/success_vs_failure_rate.png`（双图：成功率带 Wilson 区间；
-   `FALSE_FINISH` 与 `unsafe_release` 比例）。`results/summary.csv` 与 `results/summary.md`
-   是同一批数字的机器可读版本。
+   `FALSE_FINISH` 与 `unsafe_release` 比例；同一条 x 上多个策略做了 dodge 偏移以便看清）。
+   `results/summary.csv` 与 `results/summary.md` 是同一批数字的机器可读版本。
 
 > ⚠️ 这些结论建立在**拍的**故障参数上（见 §9 局限 1、2）。故障率旋钮扫的是「注入多频繁」，
-> 不是「真机多容易坏」；换一组权重，naive 的下降曲线会变形，但「验证 + 重试 + 求助」这条
-> 自愈链路的相对优势不会消失。
+> 不是「真机多容易坏」；本文不声称「换一组权重结论不变」——那需要另做敏感性实验。
+
+### 7.2 验证器质量扫描
+
+```bash
+uv run python -m shelf_agent.eval.cli sweep-verifier --config configs/real_screw.yaml \
+    --failure-rate 0.3 --levels 0,0.1,0.25,0.5,1.0 --seeds 200 \
+    --policies rule_oracle,rule_noisy,retry_only --out results/verifier/
+```
+
+每个档位把 `verifier.boundary_confusion` 与 `verifier.p_outside_miss` 同时抬到该档位
+（`p_inside_correct` / `p_unclear` 保持配置值）。
+
+| level | policy | episodes | SUCCESS | FALSE_FINISH | 误放行率 95% CI | unsafe_release | 误放行率 |
+|---|---|---|---|---|---|---|---|---|
+| 0.0 | retry_only | 200 | 138 | 53 | [0.2087, 0.3302] | 0.135 | 0.2650 |
+| 0.0 | rule_noisy | 200 | 196 | 0 | [0.0000, 0.0188] | 0.0 | 0.0000 |
+| 0.0 | rule_oracle | 200 | 196 | 0 | [0.0000, 0.0188] | 0.0 | 0.0000 |
+| 0.1 | retry_only | 200 | 138 | 53 | [0.2087, 0.3302] | 0.135 | 0.2650 |
+| 0.1 | rule_noisy | 200 | 193 | 1 | [0.0009, 0.0278] | 0.005 | 0.0050 |
+| 0.1 | rule_oracle | 200 | 196 | 0 | [0.0000, 0.0188] | 0.0 | 0.0000 |
+| 0.25 | retry_only | 200 | 138 | 53 | [0.2087, 0.3302] | 0.135 | 0.2650 |
+| 0.25 | rule_noisy | 200 | 193 | 2 | [0.0027, 0.0357] | 0.01 | 0.0100 |
+| 0.25 | rule_oracle | 200 | 196 | 0 | [0.0000, 0.0188] | 0.0 | 0.0000 |
+| 0.5 | retry_only | 200 | 138 | 53 | [0.2087, 0.3302] | 0.135 | 0.2650 |
+| 0.5 | rule_noisy | 200 | 183 | 12 | [0.0347, 0.1019] | 0.06 | 0.0600 |
+| 0.5 | rule_oracle | 200 | 196 | 0 | [0.0000, 0.0188] | 0.0 | 0.0000 |
+| 1.0 | retry_only | 200 | 138 | 53 | [0.2087, 0.3302] | 0.135 | 0.2650 |
+| 1.0 | rule_noisy | 200 | 175 | 21 | [0.0697, 0.1552] | 0.105 | 0.1050 |
+| 1.0 | rule_oracle | 200 | 196 | 0 | [0.0000, 0.0188] | 0.0 | 0.0000 |
+
+> **level=0 不等于无噪声**：`p_inside_correct = 0.95` 仍会产生 ±1 的计数噪声（真值 N−1 时仍有一定
+> 概率被报成 N），所以 level=0 时 `rule_noisy` 仍可能有极个别 `FALSE_FINISH`。
+
+图：`results/verifier/verifier_sweep.png`（误放行率 / 不安全放行率 vs 档位，`retry_only` 作参考线）。
 
 ---
 
@@ -374,3 +448,8 @@ python scripts/live_probe.py --scenario happy
 6. **不做训练**：本期没有 SFT / RL，轨迹 JSONL 是为将来的 SFT 准备的（`truth_snapshot` 已严格
    剥离，见 `tests/test_no_leak.py`）。
 7. **不接真机**：仿真与真机共用 `SkillBackend` 接口，但真机实现不在本期（Q10）。
+8. **验证器噪声对端到端的影响只在小范围量化过**：§7.2 扫了 5 个噪声档位 × 200 seed，
+   说明「档位越高误放行越多」这个方向；但**档位与真实 VLM 的对应关系没有校准**，
+   不能直接读成「真机上会有多少误放行」。
+9. **观测通道现在是干净的，但只有仿真干净**：A27 保证 message 不泄露隐藏状态；
+   真机接进来以后，实验室那边返回的字段（如果比 `status` 多）需要再走一遍同样的白名单。

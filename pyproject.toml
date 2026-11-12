@@ -29,6 +29,7 @@ packages = ["src/shelf_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["slow: 较慢的测试（跨进程）"]
 filterwarnings = ["error::DeprecationWarning:shelf_agent.*"]
 
 [tool.coverage.run]

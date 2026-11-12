@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Mapping
 
 from ..contracts.schema import ArgsError, validate_args, validate_result_data
 from ..contracts.spec import ToolSpecSet

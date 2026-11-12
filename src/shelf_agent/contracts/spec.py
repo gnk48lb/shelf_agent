@@ -70,11 +70,17 @@ class ToolSpec:
     preconditions: tuple[str, ...] = ()
     effects: tuple[str, ...] = ()
     reset_durations: Mapping[str, float] = field(default_factory=dict)
+    description_en: str = ""
 
     @property
     def duration(self) -> Duration:
         """耗时的均值 + 抖动模型。"""
         return Duration(mean_s=self.mean_s, jitter=self.jitter)
+
+    @property
+    def english_description(self) -> str:
+        """给 LLM 用的英文描述（缺省回退中文 description）。"""
+        return self.description_en or self.description
 
     def required_params(self) -> tuple[str, ...]:
         return tuple(p.name for p in self.params if p.required)
@@ -204,6 +210,7 @@ def _parse_tool(raw: Any, index: int) -> ToolSpec:
     return ToolSpec(
         name=name,
         description=_require_str(mapping["description"], f"{path}.description"),
+        description_en=_require_str(mapping.get("description_en", ""), f"{path}.description_en"),
         params=_parse_params(mapping["params"], f"{path}.params"),
         returns_status=_require_str_list(mapping["returns_status"], f"{path}.returns_status"),
         returns_data=_require_str_list(mapping["returns_data"], f"{path}.returns_data"),

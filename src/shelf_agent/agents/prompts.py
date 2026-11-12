@@ -21,7 +21,7 @@ DEFAULT_EXPOSED_TOOLS: tuple[str, ...] = (
     "finish",
 )
 
-#: 四条硬规则（§3.7）。
+#: 五条硬规则（§3.7）。
 RULES = (
     "Never call robot2_carry_box unless the most recent verify_box report was complete: "
     "clear is true, inside == {target}, and outside == 0.",
@@ -34,9 +34,15 @@ RULES = (
     "Reply with exactly one tool call per turn.",
 )
 
+#: 巡检机器人可用时的补充说明（否则 LLM 不知道这个工具干什么）。
+INSPECTOR_RULE = (
+    "Call inspector_run only when a tool tells you the inspection robot can check the shelf; "
+    "its result is data field box_on_shelf (true means the box is on the shelf)."
+)
+
 
 def describe_tools(tools: Sequence[object], target: int) -> str:
-    """把契约里的工具渲染成 prompt 里的说明段。"""
+    """把契约里的工具渲染成 prompt 里的说明段（英文描述）。"""
     lines: list[str] = []
     for tool in tools:
         params = ", ".join(
@@ -44,7 +50,7 @@ def describe_tools(tools: Sequence[object], target: int) -> str:
             for p in tool.params
         )
         returns = ", ".join(tool.returns_data) if tool.returns_data else "nothing"
-        lines.append(f"- {tool.name}({params}) -> status, data: {returns}. {tool.description}")
+        lines.append(f"- {tool.name}({params}) -> status, data: {returns}. {tool.english_description}")
     return "\n".join(lines)
 
 
@@ -52,10 +58,16 @@ def build_system_prompt(
     info: EpisodeInfo,
     tool_names: Iterable[str] | None = None,
 ) -> str:
-    """生成 system prompt。"""
+    """生成 system prompt（全英文）。"""
     wanted = set(tool_names) if tool_names is not None else None
     tools = [t for t in info.tools if wanted is None or t.name in wanted]
-    rules = "\n".join(f"{index + 1}. {rule.format(target=info.target_screws)}" for index, rule in enumerate(RULES))
+    rules = "\n".join(
+        f"{index + 1}. {rule.format(target=info.target_screws)}"
+        for index, rule in enumerate(RULES)
+    )
+    inspector = ""
+    if any(tool.name == "inspector_run" for tool in tools):
+        inspector = f"\n{INSPECTOR_RULE}"
     return (
         "You are the controller of a two-robot screw-packing workstation.\n"
         f"The goal: fill one box with exactly {info.target_screws} screws and deliver the box "
@@ -65,7 +77,7 @@ def build_system_prompt(
         f"{describe_tools(tools, info.target_screws)}\n"
         "\n"
         "Rules:\n"
-        f"{rules}\n"
+        f"{rules}{inspector}\n"
         "\n"
         "A tool result tells you only what was observed: status, optional error_code, a message, "
         "the elapsed seconds and the declared data fields. The box state is never returned "

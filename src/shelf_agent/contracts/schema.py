@@ -83,10 +83,12 @@ def _param_json_schema(param: ParamSpec) -> dict[str, Any]:
 
 
 def tool_to_openai_schema(spec: ToolSpec) -> dict[str, Any]:
-    """单个工具转成 OpenAI function-calling 的 function 定义。"""
-    description = spec.description
-    if spec.lab_name:
-        description = f"{description}（实验室名：{spec.lab_name}）"
+    """单个工具转成 OpenAI function-calling 的 function 定义。
+
+    描述用**英文**（``description_en``），且不追加实验室名——LLM 看到的是
+    「这个工具做什么」，不是「实验室里它叫什么」。
+    """
+    description = spec.english_description
     properties = {p.name: _param_json_schema(p) for p in spec.params}
     required = [p.name for p in spec.params if p.required]
     return {

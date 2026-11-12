@@ -8,6 +8,7 @@ tools:
     lab_name: robot1.install_screws
     robot: robot1
     description: "一号机器人把螺丝补装到指定箱内，直到达到目标数量。阻塞、不可中断。"
+    description_en: "Robot 1 tops up the screws inside the given box until the target count is reached. Blocking, not interruptible."
     params:
       - {name: box_id, type: string, required: true, description: "目标箱子 id"}
     returns_status: [done, timeout]
@@ -21,6 +22,7 @@ tools:
     lab_name: robot1.get_head_image
     robot: robot1
     description: "一号机器人头部相机拍一张箱内照片，只返回图像引用。"
+    description_en: "Robot 1 takes one head-camera photo of the box interior and returns only an image reference."
     params:
       - {name: box_id, type: string, required: true}
     returns_status: [ok]
@@ -34,6 +36,7 @@ tools:
     lab_name: null
     robot: null
     description: "拍照并用验证器检查箱子：箱内数、箱外散落数、是否清晰。"
+    description_en: "Take a photo and check the given box with the verifier: screw count inside, loose screws outside, and whether the view is clear."
     params:
       - {name: box_id, type: string, required: true}
     returns_status: [ok, error]
@@ -47,6 +50,7 @@ tools:
     lab_name: robot2.carry_box
     robot: robot2
     description: "二号机器人把指定箱子搬到货架。阻塞、不可中断。"
+    description_en: "Robot 2 carries the given box to the shelf. Blocking, not interruptible."
     params:
       - {name: box_id, type: string, required: true}
       - {name: slot_id, type: string, required: false, description: "期望的货架槽位；被占则换槽"}
@@ -61,6 +65,7 @@ tools:
     lab_name: reset
     robot: null
     description: "让机器人回到初始位姿。永不失败。"
+    description_en: "Return a robot to its home pose. Never fails."
     params:
       - {name: robot, type: enum, values: [robot1, robot2, all], required: true}
     returns_status: [ok]
@@ -75,6 +80,7 @@ tools:
     lab_name: inspector.run
     robot: inspector
     description: "巡检机器人巡视，默认 noop。"
+    description_en: "The inspection robot runs its patrol; in noop mode it does nothing."
     params: []
     returns_status: [done]
     returns_data: [box_on_shelf]
@@ -87,6 +93,7 @@ tools:
     lab_name: null
     robot: null
     description: "向人类求助：散落螺丝归位、箱子放回工位、故障机器人复位。"
+    description_en: "Ask a human for help: loose screws back into the box, a lost box back to the station, a faulted robot reset."
     params:
       - {name: question, type: string, required: true}
     returns_status: [ok, error]
@@ -100,6 +107,7 @@ tools:
     lab_name: null
     robot: null
     description: "结束本轮任务。"
+    description_en: "End the episode."
     params:
       - {name: success, type: bool, required: true}
       - {name: summary, type: string, required: true}

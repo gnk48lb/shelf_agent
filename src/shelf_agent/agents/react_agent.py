@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
 from ..contracts.schema import to_openai_tools
 from ..contracts.types import EpisodeInfo, ToolCall, ToolResult
@@ -57,10 +57,14 @@ class ReActAgent:
 
     def start(self, info: EpisodeInfo) -> None:
         """开局：生成 system prompt 与 tools schema。"""
+        names = list(self.tool_names)
+        # 巡检机器人能看货架时（inspector.mode = shelf_status）才暴露 inspector_run。
+        if info.inspector_mode == "shelf_status" and "inspector_run" not in names:
+            names.append("inspector_run")
         self._messages = [
-            {"role": "system", "content": build_system_prompt(info, self.tool_names)}
+            {"role": "system", "content": build_system_prompt(info, names)}
         ]
-        selected = [t for t in info.tools if t.name in set(self.tool_names)]
+        selected = [t for t in info.tools if t.name in set(names)]
         self._tools = to_openai_tools(selected)
         self._issued_ids = []
         self._consumed = 0
@@ -76,7 +80,9 @@ class ReActAgent:
             self._messages.append({"role": "user", "content": NO_TOOL_CALL_REMINDER})
             logger.warning("LLM 没有给出 tool call（第 %s 次）", self._no_call_streak)
             if self._no_call_streak >= self.max_no_tool_call:
-                raise AgentError("连续两次没有有效 tool call，episode 记 AGENT_ERROR")
+                raise AgentError(
+                    f"连续 {self.max_no_tool_call} 次没有有效 tool call，episode 记 AGENT_ERROR"
+                )
             return self.next_call(history)
         self._no_call_streak = 0
         if len(response.tool_calls) > 1:

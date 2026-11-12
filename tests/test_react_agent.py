@@ -162,6 +162,56 @@ def test_react_agent_exposes_head_image_on_request() -> None:
     assert "robot1_get_head_image" in names
 
 
+def _has_chinese(text: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in text)
+
+
+def test_system_prompt_is_english_only() -> None:
+    """LLM 看到的文本里不能混中文（工具描述用 description_en）。"""
+    agent = _agent([_call("finish", {"success": False, "summary": "x"}, "c1")])
+    result = run_react_episode(CONFIG, seed=0, agent=agent, failure_rate=0.0)
+    prompt = result.messages[0]["content"]  # type: ignore[index]
+    assert not _has_chinese(prompt), "系统提示里出现了中文"
+
+
+def test_tools_schema_is_english_only() -> None:
+    agent = _agent([_call("finish", {"success": False, "summary": "x"}, "c1")])
+    result = run_react_episode(CONFIG, seed=0, agent=agent, failure_rate=0.0)
+    for entry in result.tools_schema or []:
+        assert not _has_chinese(entry["function"]["description"])
+        for param in entry["function"]["parameters"]["properties"].values():
+            assert not _has_chinese(param.get("description", ""))
+
+
+def test_lab_name_is_not_exposed_to_the_llm() -> None:
+    """实验室名只用于人读的映射，不进 LLM 的 schema。"""
+    agent = _agent([_call("finish", {"success": False, "summary": "x"}, "c1")])
+    result = run_react_episode(CONFIG, seed=0, agent=agent, failure_rate=0.0)
+    for entry in result.tools_schema or []:
+        assert "robot1.install_screws" not in entry["function"]["description"]
+
+
+def test_inspector_is_exposed_only_in_shelf_status_mode() -> None:
+    """inspector.mode = shelf_status 时 ReAct 才能看到 inspector_run。"""
+    agent = _agent([_call("finish", {"success": False, "summary": "x"}, "c1")])
+    result = run_react_episode(CONFIG, seed=0, agent=agent, failure_rate=0.0)
+    names = [t["function"]["name"] for t in result.tools_schema or []]
+    assert "inspector_run" not in names
+
+    from shelf_agent.config import build_config
+
+    raw = {
+        **CONFIG.raw,
+        "inspector": {**CONFIG.raw["inspector"], "mode": "shelf_status"},
+    }
+    config = build_config(raw)
+    agent2 = _agent([_call("finish", {"success": False, "summary": "x"}, "c1")])
+    result2 = run_react_episode(config, seed=0, agent=agent2, failure_rate=0.0)
+    names2 = [t["function"]["name"] for t in result2.tools_schema or []]
+    assert "inspector_run" in names2
+    assert "inspection robot" in result2.messages[0]["content"].lower()  # type: ignore[index]
+
+
 def test_agent_error_exception_is_raised_by_the_agent() -> None:
     agent = _agent([LLMResponse(content="x", tool_calls=[])])
     agent.start(

@@ -8,7 +8,6 @@ from __future__ import annotations
 from typing import Sequence
 
 from ..contracts.types import EpisodeInfo, ToolCall, ToolResult
-from .policy import Policy
 
 
 class NaiveScriptPolicy:
