@@ -272,7 +272,8 @@ def write_sweep_files(
     out_dir.mkdir(parents=True, exist_ok=True)
     write_jsonl(out_dir / "episodes.jsonl", [r.to_dict() for r in results])
     _write_csv(out_dir / "summary.csv", rows, x_key)
-    from .report import render_sweep_markdown
+    from .report import plot_success_vs_failure_rate
+    from .summary import render_sweep_markdown
 
     markdown = render_sweep_markdown(
         rows, results, seeds, failure_rates, policies, config, x_key
@@ -297,7 +298,8 @@ def write_verifier_sweep_files(
     out_dir.mkdir(parents=True, exist_ok=True)
     write_jsonl(out_dir / "episodes.jsonl", [r.to_dict() for r in results])
     _write_csv(out_dir / "verifier_sweep.csv", rows, "verifier_level")
-    from .report import render_verifier_markdown
+    from .report import plot_false_finish_vs_level
+    from .summary import render_verifier_markdown
 
     markdown = render_verifier_markdown(rows, seeds, levels, policies, failure_rate, config)
     (out_dir / "verifier_sweep.md").write_text(markdown, encoding="utf-8")

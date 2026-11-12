@@ -14,7 +14,7 @@
 |---|---|---|---|
 | A1 | `robot1_install_screws` 语义为「补装到目标数 N」，不会过装 | 决定 `missing = N − inside` 的算法与 STRAY/INCOMPLETE 的进度取值。真机若一次装一颗，需改成累加语义。 | 待师兄确认 |
 | A2 | 前置不满足（含机器人处于 FAULT）表现为「卡住但不改变状态」：耗时 `timeout_s`、返回 `timeout`、状态不变 | 决定「必须先 reset 才能继续」这条恢复动态是否成立。若真机前置不满足会立刻报错，FAULT 语义与自愈流程都要重写。 | 待师兄确认 |
-| A3 | `reset` 不改变箱子与螺丝、不会失败、耗时取配置参数 | 决定「reset 后要重新验证」的必要性，以及 `unnecessary_reset` 的计数口径。 | 待师兄确认 |
+| A3 | `reset` 不改变箱子与螺丝、不会失败、耗时取配置参数；**`unnecessary_reset` 按调用计**——只有所有目标机器人此前都是 OK 才记 1 次（`reset(all)` 只有一台故障时不算不必要） | 决定「reset 后要重新验证」的必要性，以及 `unnecessary_reset` 的计数口径（计数口径的完整推导见 A29）。 | 待师兄确认 |
 | A4 | `carry` 只返回 `done` / `timeout`；`SILENT_FAIL`（返回 done 但箱子没动）与 `LOST`（箱子丢失）存在，概率由 `p_lost` 控制 | 这两类是「无观察通道的失败」，是 POST_CHECK 与 HUMAN 分支存在的理由。若真机搬运从不静默失败，`carry_silent_fail_detected` 场景需降级为 [可]。 | 待师兄确认 |
 | A5 | 箱子在工位时头部相机可拍到；箱子不在工位时验证不可用（`BOX_NOT_AT_STATION`） | 决定 `verify_box` 的前置检查与 `lost_box_needs_human` 场景的判定路径。 | 待师兄确认 |
 | A6 | 巡检机器人默认 `noop`；若师兄确认它能看货架，则切 `shelf_status` 模式 | 只影响 `inspector_run` 是否有实际作用，默认不影响主流程。 | 待师兄确认 |
